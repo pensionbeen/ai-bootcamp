@@ -1,0 +1,39 @@
+{
+  "answer_allowed": false,
+  "as_of_date": "2026-10-01",
+  "database_sha256": "6e6f9db59e8cbd5e6ac4e3824c3720cd1f8c1da77ffee143172943c1d9691639",
+  "identity": "71ce40874477c9a4bc9d2c0fe833f99fa59127b00fd2dca3a5940e2ebf4ba0bb",
+  "input_files": {
+    "data/processed/attachments/2026-10-01/held_continuation/combined_embeddings.json": "f5de38eb9092b2b9401f1e9c3a274f1404bbfd53bb4bba1b377e12164b49836d",
+    "data/processed/attachments/2026-10-01/held_continuation/external_materials_required.json": "adca368e1086e7a1b7070bbf8d24a9b8d96b04b8352c493e55a3108975473f54",
+    "data/processed/attachments/2026-10-01/search_validation_93_final/snapshot.json": "2c70d2417851216def3e021c4829b1afe48f8a13543a3ffcc9c861cca0b8e4bb",
+    "data/processed/ordinances/2026-10-01/2054497.articles.json": "82d7813925505d37bbff0064566b261a83efbed6f5657e213c3683a217728431",
+    "data/processed/ordinances/2026-10-01/2147709.articles.json": "779189c16249f3752df8b5d1862929f1a64b762a519c6a6ab69b9202e3c07915",
+    "data/processed/ordinances/2026-10-01/2171767.articles.json": "e863e9595bc8948c3958e7168e3ed2c9b910453f11281617a7ce03a1fa696f5b",
+    "data/processed/ordinances/2026-10-01/2171803.articles.json": "21c862c3a5482733ea1ee599c9e62484b46af369fbbe2c0c41ded8a6540000be",
+    "data/processed/ordinances/2026-10-01/2171829.articles.json": "1308a058bb46ec63b805f32d6402103d27435c6e6475f3b2d50658cae15eb752",
+    "data/processed/ordinances/2026-10-01/2171833.articles.json": "e4b6db601821482e654b37e4245c89ed948345999453e5f399bc2b5c16e759c2",
+    "data/processed/ordinances/2026-10-01/embeddings/1bbd861c1f73dc181dee/embeddings.json": "88b721249af7cbe6b098d09987a9addd84a56bd97c6042ad1f4ca3f76a7e071e",
+    "data/processed/ordinances/2026-10-01/embeddings/1bbd861c1f73dc181dee/embeddings.manifest.json": "35782d4bd2e08551c6a970a66ea2bcb383430329336643caab90fa753b64f9ee",
+    "data/processed/ordinances/2026-10-01/embeddings/1bbd861c1f73dc181dee/inputs.json": "1bbd861c1f73dc181dee0e5fdb0b10978a2f731463514e0aea4e06dbdbe478b9",
+    "data/processed/reviews/asof_2026-10-01/requirements.json": "bfe3f50863a501e6572e2995aaae4742d9c081b78900a5178e25794d2043fd7f",
+    "data/processed/reviews/asof_2026-10-01/review.manifest.json": "be75e006a8a17d7aaf432c221b5b80fada0f65e059492f301e009304cb3fc1c1",
+    "data/processed/reviews/asof_2026-10-01/reviewed_conditions.json": "8c185f61aa11f95eb263dfcfb1e09999cf10653ab1835ed08e0d2a6d966ab701",
+    "src/search_combined_attachments.py": "6cae6a37291f3a87f35bee483a9a28caab18a28ac404b29bf5ca4ac4ab4fb3c1"
+  },
+  "schema_version": "local-ordinance-rag-sqlite-v1",
+  "summary": {
+    "answer_allowed": false,
+    "attachment_count": 93,
+    "body_count": 513,
+    "chunk_count": 810,
+    "condition_count": 434,
+    "conditions_are_stored_without_inferred_applicability": true,
+    "context_count": 454,
+    "context_link_count": 1031,
+    "deleted_count": 6,
+    "dimension": 1024,
+    "external_task_count": 23,
+    "supplement_count": 204
+  }
+}
