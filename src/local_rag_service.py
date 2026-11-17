@@ -15,7 +15,8 @@ A body with `wait_seconds` (0..75) on either path is the asynchronous mode: HTTP
 202 reports a pending job, not a completed legal answer. Solar work may continue
 longer in its worker. `--host` other than loopback is for the grading
 environment only. GET / serves the citizen demo page (src/web/index.html), which
-uses POST /ui/ask. Other GET paths serve allow-listed static files under src/web/.
+uses POST /ui/ask. GET /test serves the submission checker, which calls POST /ask.
+Other GET paths serve allow-listed static files under src/web/.
 
 Timing: the grader allows 90 seconds per question. A synchronous request waits
 at most SYNC_WAIT_SECONDS (80) measured from the start of the request handler,
@@ -573,7 +574,8 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 job = self.server.jobs.get(match[1])
                 return self._send(self._job_status(job), job) if job else self._error(404, "job_not_found")
-            static = static_file(self.path)
+            static_path = "/test.html" if self.path in ("/test", "/test/") else self.path
+            static = static_file(static_path)
             if static is not None:
                 return self._send_file(*static)
             self._error(404, "not_found")

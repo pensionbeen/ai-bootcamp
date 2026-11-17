@@ -523,6 +523,17 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("x-rag-status", headers)
         self.assertEqual(self.runtime.paid, [])
 
+    def test_submission_checker_serves_static_page_without_submitting(self):
+        content = b"<!DOCTYPE html><title>submission checker</title>"
+        root = self.web_root({"test.html": content})
+        for path in ("/test", "/test/"):
+            status, headers, body = self.raw_get(path)
+            self.assertEqual((status, body), (200, content), path)
+            self.assertWebHeaders(headers, body, "text/html; charset=utf-8")
+        (root / "test.html").unlink()
+        self.assertNotFound("/test")
+        self.assertEqual(self.runtime.paid, [])
+
     def test_demo_page_on_non_loopback_follows_tunnel_host_rules(self):
         self.server.bound_host = "0.0.0.0"
         try:
