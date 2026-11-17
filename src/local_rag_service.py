@@ -47,6 +47,9 @@ import threading
 import time
 import uuid
 
+from submission_http import SubmissionCheck
+
+SUBMISSION_CHECK_PATH = "/test/submission"
 JOB_AREA = "data/processed/local_rag/2026-10-01/service_jobs"
 JOB_ID = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BODY = 32768
@@ -528,6 +531,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _error(self, status, code):
+        if self.path == SUBMISSION_CHECK_PATH and self.command == "POST":
+            return self._send(status, {"error": code, "elapsed_ms": 0})
         if self._kit:
             # Grader-mode /ask: the kit body only; the reason stays in the header.
             return self._send(status, kit_view(None), {"X-Rag-Status": code})
@@ -587,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
         self._kit = self.path == "/ask"
         if not self._local():
             return self._error(403, "local_origin_required")
-        if self.path not in ASK_PATHS:
+        if self.path not in ASK_PATHS and self.path != SUBMISSION_CHECK_PATH:
             return self._error(404, "not_found")
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get("Transfer-Encoding") is not None:
@@ -619,6 +624,10 @@ class Handler(BaseHTTPRequestHandler):
             question, wait = request.get("question"), request.get("wait_seconds", 0)
             if not isinstance(question, str) or not question.strip() or len(question.encode("utf-8")) > MAX_QUESTION:
                 return self._error(400, "invalid_question")
+            if self.path == SUBMISSION_CHECK_PATH:
+                if set(request) != {"question"}:
+                    return self._error(400, "invalid_request_fields")
+                return self._send(*self.server.submission_check.run(question))
             if type(wait) not in (int, float) or not 0 <= wait <= ASYNC_WAIT_LIMIT or not math.isfinite(wait):
                 return self._error(400, "invalid_wait_seconds")
             if sync:
@@ -672,7 +681,9 @@ def create_server(project, port=8000, *, runtime=None, publicizer=None, health_p
     jobs = Jobs(project, runtime=runtime, publicizer=publicizer, health_provider=health_provider, queue_size=queue_size,
                 readiness_provider=readiness_provider, workers=workers)
     try:
+        submission_check = SubmissionCheck(os.environ.get("SUBMISSION_CHECK_BASE_URL"))
         server = Server((host, port), Handler)
+        server.submission_check = submission_check
         server.jobs, server.bound_host = jobs, host
         return server
     except Exception:

@@ -38,9 +38,12 @@
     pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .87rem/1.65 var(--mono); }
     .code { background: #1b2b3b; color: #eef5ff; padding: 13px 15px; border-radius: 6px; }
     .hint { font-size: .86rem; }
-    #progress:not(:empty) { margin-top: 10px; }
     #result { margin-top: 18px; }
-    #verdict { border-radius: 5px; padding: 3px 9px; font-size: .86rem; font-weight: 700; }
+    #verdict, .outcome { border-radius: 5px; padding: 3px 9px; font-size: .86rem; font-weight: 700; }
+    .report { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .outcome { margin-left: 8px; }
+    .detail-note:not(:empty) { margin-top: 8px; color: var(--muted); }
     .pass { color: #205b41; background: #e6f4eb; }
     .fail { color: #942a29; background: #feeeee; }
     .info, .skip { color: #46576c; background: #eef2f6; }
@@ -65,7 +68,7 @@
     <nav><a href="/">← 서울시 조례 묻고 답하기</a></nav>
     <header>
       <h1>대회 API 테스트</h1>
-      <p>실제 질문을 보내 90초 안에 제출 규격에 맞는 JSON 응답이 오는지 확인합니다.</p>
+      <p>같은 질문을 브라우저와 저장소의 Python 제출 검사기로 각각 보내고, 90초 안에 돌아온 JSON을 점검합니다.</p>
     </header>
     <form class="panel" id="test-form">
       <div class="request-head">
@@ -83,7 +86,6 @@
           <pre class="code" id="request-body"></pre>
         </div>
       </div>
-      <p class="hint" id="progress" role="status"></p>
       <noscript>검사를 실행하려면 브라우저에서 자바스크립트를 켜 주세요.</noscript>
     </form>
     <section class="panel" id="result" aria-labelledby="result-title" hidden>
@@ -91,20 +93,27 @@
         <h2 id="result-title" tabindex="-1">검사 결과</h2>
         <span id="verdict" role="status"></span>
       </div>
-      <div class="result-grid">
-        <div>
-          <h3>항목별 결과</h3>
-          <ul id="checks"></ul>
-        </div>
-        <div>
-          <div class="body-head">
-            <h3>응답 본문</h3>
-            <label id="raw-option" hidden><input type="checkbox" id="show-raw"> 원문 보기</label>
-          </div>
-          <pre class="code" id="response-body"></pre>
-        </div>
-      </div>
+      <div id="reports"></div>
     </section>
+    <template id="report-template">
+      <details class="report" open>
+        <summary><span class="client-name"></span><span class="outcome info">응답 대기</span></summary>
+        <p class="detail-note"></p>
+        <div class="result-grid" hidden>
+          <div>
+            <h3>항목별 결과</h3>
+            <ul class="checks"></ul>
+          </div>
+          <div>
+            <div class="body-head">
+              <h3>응답 본문</h3>
+              <label class="raw-option" hidden><input type="checkbox"> 원문 보기</label>
+            </div>
+            <pre class="code response-body"></pre>
+          </div>
+        </div>
+      </details>
+    </template>
   </main>
 </body>
 </html>
