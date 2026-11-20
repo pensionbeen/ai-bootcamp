@@ -51,7 +51,12 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
+from complaint_draft import DETAILS_MAX, make_draft, upstage_chat
+import i18n_answer
+import photo_question
+import source_text
 from concise_public_answer import concise_answer
+from kakao_skill import DEFAULT_CALLBACK_HOSTS, KAKAO_SKILL_PATH, KakaoSkill, render as kakao_render
 from request_audit import RequestAudit
 from submission_http import SubmissionCheck
 
@@ -60,11 +65,20 @@ INQUIRY_URL = "https://www.epeople.go.kr/"
 JOB_AREA = "data/processed/local_rag/2026-10-01/service_jobs"
 JOB_ID = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BODY = 32768
+KAKAO_MAX_BODY = 65536
 MAX_QUESTION = 16000
 ASYNC_WAIT_LIMIT = 75
 SYNC_WAIT_SECONDS = 80
 UNKNOWN = "확인 불가"
 ASK_PATHS = ("/ask", "/ui/ask")
+DRAFT_PATH = "/ui/draft"
+DRAFT_CONCURRENCY = 2
+PHOTO_PATH = "/ui/photo"
+PHOTO_MAX_BODY = 4_600_000  # base64로 3MB 사진
+SOURCES_PATH = "/ui/sources"
+TRANSLATE_QUESTION_PATH = "/ui/translate-question"
+TRANSLATE_ANSWER_PATH = "/ui/translate-answer"
+TRANSLATE_CONCURRENCY = 4
 # X-Rag-Status values for a grader-mode /ask answer that has a job.
 KIT_STATUSES = ("completed", "deadline_exceeded", "failed", "interrupted", "processing_error")
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -404,6 +418,12 @@ class Jobs:
         with self.lock:
             return self.public(self.records[identity])
 
+    def question(self, identity):
+        """작업의 원래 질문(민원 초안용). 없으면 None."""
+        with self.lock:
+            record = self.records.get(identity)
+            return record["question"] if record is not None else None
+
     def wait(self, identity, seconds):
         with self.lock:
             event = self.events.get(identity)
@@ -488,6 +508,24 @@ def sync_view(job):
         view["result"] = copy.deepcopy(job["result"])
     view.update(answer_allowed=False, final_answer_generated=False)
     return view
+
+
+def kakao_resolver(jobs):
+    """카카오 스킬용: 질문을 /ui/ask와 같은 큐로 처리하고 deadline까지 기다려 sync_view를 돌려줍니다."""
+    def resolve(question, deadline):
+        try:
+            job = jobs.submit(question.strip())
+        except Busy:
+            return {"status": "queue_full", "answer": UNKNOWN, "citation": []}, 200
+        except Exception:
+            return {"status": "processing_error", "answer": UNKNOWN, "citation": []}, 200
+        while job["status"] in ("queued", "running"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            job = jobs.wait(job["job_id"], min(remaining, 5))
+        return sync_view(job), 200
+    return resolve
 
 
 def _kit_response(job):
@@ -652,6 +690,27 @@ class Handler(BaseHTTPRequestHandler):
             value.update(answer=UNKNOWN, citation=[])
         self._send(status, value)
 
+    def _kakao_skill(self):
+        """POST /kakao/skill: 카카오 i 오픈빌더 스킬. 카카오가 읽을 수 있게 항상 HTTP 200과 응답 JSON 2.0을 보냅니다."""
+        kakao = getattr(self.server, "kakao", None)
+        lengths = self.headers.get_all("Content-Length", [])
+        if kakao is None:
+            return self._error(404, "not_found")
+        if (self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1
+                or not re.fullmatch(r"[0-9]{1,6}", lengths[0]) or int(lengths[0]) > KAKAO_MAX_BODY):
+            return self._error(400, "invalid_kakao_request")
+        try:
+            self.connection.settimeout(5)
+            content = self.rfile.read(int(lengths[0]))
+            payload = json.loads(content)
+        except (ValueError, UnicodeError, TimeoutError, OSError):
+            return self._error(400, "invalid_kakao_request")
+        try:
+            body = kakao.handle(payload)
+        except Exception:
+            body = kakao_render(None, {"kind": "retry", "text": "처리 중 오류가 났어요. 잠시 후 다시 보내 주세요."})
+        self._send(200, body)
+
     def _local(self):
         port = str(self.server.server_port)
         hosts = self.headers.get_all("Host", [])
@@ -681,7 +740,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path.split("?", 1)[0] in ("/admin/requests", "/admin/requests/", "/admin/requests/data", "/request-log.html"):
                 return self._admin_requests()
-            if self.path in WEB_PATHS:
+            # 첫 화면은 ?lang=en 같은 언어 지정을 붙여 열 수 있습니다(화면이 읽음, 서버는 무시).
+            page_path, _, query = self.path.partition("?")
+            if self.path in WEB_PATHS or (page_path in WEB_PATHS and re.fullmatch(r"lang=[A-Za-z-]{2,5}", query)):
                 return self._send_page()
             if self.path == "/health":
                 health = self.server.jobs.health()
@@ -698,7 +759,190 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self._error(503, "processing_error")
 
+    def _draft(self):
+        """POST /ui/draft {job_id, details?}: 끝난 질문 하나로 민원 초안을 만듭니다(complaint_draft.py)."""
+        if not self._local():
+            return self._error(403, "local_origin_required")
+        lengths = self.headers.get_all("Content-Length", [])
+        if (self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1
+                or not re.fullmatch(r"[0-9]{1,10}", lengths[0])):
+            return self._error(411, "content_length_required")
+        if int(lengths[0]) > MAX_BODY:
+            return self._error(413, "request_too_large")
+        if self.headers.get_content_type() != "application/json":
+            return self._error(415, "application_json_required")
+        try:
+            self.connection.settimeout(5)
+            request = json.loads(self.rfile.read(int(lengths[0])), object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError, TimeoutError, OSError):
+            return self._error(400, "invalid_json_request")
+        if not isinstance(request, dict):
+            return self._error(400, "invalid_request_fields")
+        job_id, details = request.get("job_id"), request.get("details", "")
+        if not isinstance(job_id, str) or not JOB_ID.match(job_id):
+            return self._error(400, "invalid_job_id")
+        if not isinstance(details, str) or len(details) > DETAILS_MAX:
+            return self._error(400, "invalid_details")
+        job = self.server.jobs.get(job_id)
+        if job is None:
+            return self._error(404, "job_not_found")
+        if job["status"] != "completed":
+            return self._error(409, "job_not_completed")
+        question = self.server.jobs.question(job_id) or ""
+        if not self.server.draft_slots.acquire(blocking=False):
+            return self._error(429, "draft_busy")
+        try:
+            draft = make_draft(question, details, sync_view(job), self.server.draft_chat)
+        except Exception:
+            return self._error(500, "draft_failed")
+        finally:
+            self.server.draft_slots.release()
+        self._send(200, {"status": "ok", "job_id": job_id, "draft": draft})
+
+    def _json_body(self, limit):
+        """(요청 dict, None) 또는 (None, 오류 응답을 이미 보냈음). 화면 보조 API 공통 본문 검사."""
+        if not self._local():
+            return None, self._error(403, "local_origin_required")
+        lengths = self.headers.get_all("Content-Length", [])
+        if (self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1
+                or not re.fullmatch(r"[0-9]{1,10}", lengths[0])):
+            return None, self._error(411, "content_length_required")
+        if int(lengths[0]) > limit:
+            return None, self._error(413, "request_too_large")
+        if self.headers.get_content_type() != "application/json":
+            return None, self._error(415, "application_json_required")
+        try:
+            self.connection.settimeout(10)
+            content = self.rfile.read(int(lengths[0]))
+            request = json.loads(content, object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError, TimeoutError, OSError):
+            return None, self._error(400, "invalid_json_request")
+        if not isinstance(request, dict):
+            return None, self._error(400, "invalid_request_fields")
+        return request, None
+
+    def _photo(self):
+        """POST /ui/photo {image, mime}: 사진의 글자를 읽어 질문을 제안합니다(photo_question.py). 사진은 저장하지 않습니다."""
+        request, _ = self._json_body(PHOTO_MAX_BODY)
+        if request is None:
+            return
+        if not self.server.photo_slots.acquire(blocking=False):
+            return self._error(429, "photo_busy")
+        try:
+            result = photo_question.read_photo(request.get("image"), request.get("mime"),
+                                               self.server.photo_ocr, self.server.photo_chat)
+        except photo_question.PhotoError as error:
+            return self._error(400 if str(error) == "invalid_image" else 422, str(error))
+        except Exception:
+            return self._error(500, "photo_failed")
+        finally:
+            self.server.photo_slots.release()
+        lang = i18n_answer.valid_lang(request.get("lang")) or "ko"
+        if lang != "ko":
+            # 검색은 한국어 질문으로 하고, 화면에는 고른 언어로 보여 줍니다.
+            # 사진 속 글(개인정보 가린 것)도 번역해 "표지판에 뭐라고 쓰여 있는지"를 먼저 보여 줍니다.
+            result["question_display"] = i18n_answer.translate_text(result["question"], lang, self.server.translate_chat, "question")
+            result["text_translation"] = i18n_answer.translate_text(result["text"], lang, self.server.translate_chat, "sign")
+        self._send(200, {"status": "ok", **result})
+
+    def _sources(self):
+        """POST /ui/sources {job_id}: 그 답에 인용된 조항의 원문을 검색 DB에서 꺼냅니다(source_text.py)."""
+        request, _ = self._json_body(MAX_BODY)
+        if request is None:
+            return
+        job_id = request.get("job_id")
+        if not isinstance(job_id, str) or not JOB_ID.match(job_id):
+            return self._error(400, "invalid_job_id")
+        job = self.server.jobs.get(job_id)
+        if job is None:
+            return self._error(404, "job_not_found")
+        if job["status"] != "completed":
+            return self._error(409, "job_not_completed")
+        labels = [c for c in sync_view(job).get("citation") or [] if isinstance(c, str)][:12]
+        lang = request.get("lang", "ko")
+        if i18n_answer.valid_lang(lang) is None:
+            return self._error(400, "invalid_lang")
+        try:
+            items = self.server.source_lookup(labels)
+        except Exception:
+            return self._error(500, "sources_failed")
+        if lang != "ko":
+            with self._translate_slot() as ok:
+                if not ok:
+                    return self._error(429, "translate_busy")
+                for item in items:
+                    if item.get("found") and isinstance(item.get("text"), str):
+                        item["translation"] = i18n_answer.translate_text(item["text"], lang, self.server.translate_chat)
+        self._send(200, {"status": "ok", "job_id": job_id, "sources": items})
+
+    def _translate_slot(self):
+        server = self.server
+
+        class Slot:
+            def __enter__(self_inner):
+                self_inner.ok = server.translate_slots.acquire(blocking=False)
+                return self_inner.ok
+
+            def __exit__(self_inner, *exc):
+                if self_inner.ok:
+                    server.translate_slots.release()
+                return False
+        return Slot()
+
+    def _translate_question(self):
+        """POST /ui/translate-question {question, lang}: 외국어 질문을 검색용 한국어 질문으로 바꿉니다(i18n_answer.py)."""
+        request, _ = self._json_body(MAX_BODY)
+        if request is None:
+            return
+        question, lang = request.get("question"), i18n_answer.valid_lang(request.get("lang"))
+        if lang is None or lang == "ko":
+            return self._error(400, "invalid_lang")
+        if not isinstance(question, str) or not question.strip() or len(question) > 2000:
+            return self._error(400, "invalid_question")
+        with self._translate_slot() as ok:
+            if not ok:
+                return self._error(429, "translate_busy")
+            try:
+                korean = i18n_answer.question_to_korean(question.strip(), lang, self.server.translate_chat)
+            except Exception:
+                return self._error(502, "translate_failed")
+        self._send(200, {"status": "ok", "question_ko": korean})
+
+    def _translate_answer(self):
+        """POST /ui/translate-answer {job_id, lang}: 끝난 답을 번역합니다. 숫자가 바뀌면 번역을 쓰지 않습니다."""
+        request, _ = self._json_body(MAX_BODY)
+        if request is None:
+            return
+        job_id, lang = request.get("job_id"), i18n_answer.valid_lang(request.get("lang"))
+        if lang is None or lang == "ko":
+            return self._error(400, "invalid_lang")
+        if not isinstance(job_id, str) or not JOB_ID.match(job_id):
+            return self._error(400, "invalid_job_id")
+        job = self.server.jobs.get(job_id)
+        if job is None:
+            return self._error(404, "job_not_found")
+        if job["status"] != "completed":
+            return self._error(409, "job_not_completed")
+        view = sync_view(job)
+        if not view.get("citation"):
+            return self._send(200, {"status": "ok", "job_id": job_id, "answer": None})
+        with self._translate_slot() as ok:
+            if not ok:
+                return self._error(429, "translate_busy")
+            answer = i18n_answer.translate_answer(view.get("answer") or "", lang, self.server.translate_chat)
+        self._send(200, {"status": "ok", "job_id": job_id, "answer": answer})
+
     def do_POST(self):
+        if self.path == DRAFT_PATH:
+            return self._draft()
+        if self.path == PHOTO_PATH:
+            return self._photo()
+        if self.path == SOURCES_PATH:
+            return self._sources()
+        if self.path == TRANSLATE_QUESTION_PATH:
+            return self._translate_question()
+        if self.path == TRANSLATE_ANSWER_PATH:
+            return self._translate_answer()
         started = time.monotonic()
         self._request_started = started
         self._audit_seq = None
@@ -707,6 +951,8 @@ class Handler(BaseHTTPRequestHandler):
         self._kit = self.path == "/ask"
         if not self._local():
             return self._error(403, "local_origin_required")
+        if self.path == KAKAO_SKILL_PATH:
+            return self._kakao_skill()
         if self.path not in ASK_PATHS and self.path != SUBMISSION_CHECK_PATH:
             return self._error(404, "not_found")
         lengths = self.headers.get_all("Content-Length", [])
@@ -797,7 +1043,8 @@ class Server(ThreadingHTTPServer):
 
 
 def create_server(project, port=8000, *, runtime=None, publicizer=None, health_provider=None,
-                  queue_size=DEFAULT_QUEUE_SIZE, host="127.0.0.1", readiness_provider=None, workers=DEFAULT_WORKERS):
+                  queue_size=DEFAULT_QUEUE_SIZE, host="127.0.0.1", readiness_provider=None, workers=DEFAULT_WORKERS,
+                  drafter=None, photo_ocr=None, photo_chat=None, source_lookup=None, translate_chat=None):
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValueError("invalid_local_port")
     if type(workers) is not int or not 1 <= workers <= MAX_WORKERS:
@@ -809,6 +1056,17 @@ def create_server(project, port=8000, *, runtime=None, publicizer=None, health_p
     try:
         submission_check = SubmissionCheck(os.environ.get("SUBMISSION_CHECK_BASE_URL"))
         server = Server((host, port), Handler)
+        # 민원 초안 모델 호출(시험에서는 가짜를 넣습니다). 동시에 DRAFT_CONCURRENCY건까지만 만듭니다.
+        server.draft_chat = drafter if drafter is not None else upstage_chat(Path(project))
+        server.draft_slots = threading.BoundedSemaphore(DRAFT_CONCURRENCY)
+        # 사진으로 묻기(OCR + 질문 제안)와 조문 원문 보기. 시험에서는 가짜를 넣습니다.
+        server.photo_ocr = photo_ocr if photo_ocr is not None else photo_question.upstage_ocr(Path(project))
+        server.photo_chat = photo_chat if photo_chat is not None else photo_question.upstage_chat(Path(project))
+        server.photo_slots = threading.BoundedSemaphore(DRAFT_CONCURRENCY)
+        server.source_lookup = source_lookup if source_lookup is not None else (lambda labels: source_text.lookup(Path(project), labels))
+        # 다국어 번역(질문·답·원문). 시험에서는 가짜를 넣습니다.
+        server.translate_chat = translate_chat if translate_chat is not None else i18n_answer.upstage_chat(Path(project))
+        server.translate_slots = threading.BoundedSemaphore(TRANSLATE_CONCURRENCY)
         server.request_log_password = os.environ.get("REQUEST_LOG_PASSWORD", "")
         try:
             legacy = [{"job_id": record["job_id"], "question": record.get("question"),
@@ -818,6 +1076,10 @@ def create_server(project, port=8000, *, runtime=None, publicizer=None, health_p
             server.request_audit = None
         server.submission_check = submission_check
         server.jobs, server.bound_host = jobs, host
+        hosts = tuple(h.strip().lower() for h in os.environ.get("KAKAO_CALLBACK_HOSTS", "").split(",") if h.strip())
+        # 카카오 대기 스레드는 질문 처리 큐가 받을 수 있는 만큼(동시 처리 + 대기)만 둡니다.
+        server.kakao = KakaoSkill(kakao_resolver(jobs), callback_hosts=hosts or DEFAULT_CALLBACK_HOSTS,
+                                  max_inflight=max(1, workers + queue_size), translate_chat=server.translate_chat)
         return server
     except Exception:
         jobs.close()

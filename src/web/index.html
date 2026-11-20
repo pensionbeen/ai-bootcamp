@@ -4,356 +4,255 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>서울시 조례 묻고 답하기</title>
-<style>
-  :root { color-scheme: light; --ink: #1d2433; --muted: #5b6475; --line: #d8dde6; --accent: #1f5fbf;
-          --soft: #f3f6fb; --warn-bg: #fff6e0; --warn-ink: #6b4b00; --bad-bg: #fdecec; --bad-ink: #8a1f1f; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
-         color: var(--ink); background: #fff; line-height: 1.6; }
-  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
-  h1 { font-size: 1.4rem; margin: 0 0 4px; }
-  .lead { color: var(--muted); margin: 0 0 16px; }
-  .notice { font-size: 0.9rem; color: var(--muted); background: var(--soft); border-radius: 8px; padding: 8px 12px; margin: 0 0 16px; }
-  form { display: flex; flex-direction: column; gap: 8px; }
-  label { font-weight: 600; }
-  textarea { width: 100%; min-height: 84px; padding: 10px 12px; font: inherit; border: 1px solid var(--line);
-             border-radius: 8px; resize: vertical; }
-  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  button { font: inherit; cursor: pointer; border-radius: 8px; }
-  button:disabled { cursor: not-allowed; opacity: 0.55; }
-  #send { background: var(--accent); color: #fff; border: 0; padding: 8px 22px; font-weight: 600; }
-  .hint { font-size: 0.85rem; color: var(--muted); }
-  .examples { margin: 18px 0 8px; }
-  .examples h2 { font-size: 1rem; margin: 0 0 8px; }
-  .examples ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
-  .examples button { background: #fff; border: 1px solid var(--line); padding: 6px 12px; text-align: left; }
-  .examples button:hover:not(:disabled) { border-color: var(--accent); }
-  .tag { display: inline-block; font-size: 0.75rem; color: var(--accent); margin-right: 6px; }
-  #state { margin-top: 20px; padding: 10px 12px; border-radius: 8px; }
-  #state:empty { display: none; }
-  #state.info { background: var(--soft); }
-  #state.warn { background: var(--warn-bg); color: var(--warn-ink); }
-  #state.bad { background: var(--bad-bg); color: var(--bad-ink); }
-  #result[hidden] { display: none; }
-  #result { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-  #result h2 { font-size: 1rem; margin: 0 0 6px; }
-  #asked { color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  #answer { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 14px; }
-  #reason { font-size: 0.9rem; color: var(--muted); margin: 0 0 12px; }
-  #reason:empty { display: none; }
-  #sources { padding-left: 20px; margin: 0; }
-  #sources li { margin-bottom: 6px; overflow-wrap: anywhere; }
-  #sources a { color: var(--accent); }
-  .date { color: var(--muted); font-size: 0.85rem; margin-left: 6px; white-space: nowrap; }
-  #asof { color: var(--muted); font-size: 0.8rem; margin: 12px 0 0; }
-  #asof:empty { display: none; }
-</style>
+<meta name="theme-color" content="#0b3a6e">
+<meta name="description" content="서울특별시 조례 6종을 근거 조항과 함께 5개 언어로 안내하는 서울시 조례 도우미 Lawddy">
+<title>Lawddy — 서울시 조례 및 민원 도우미</title>
+<link rel="icon" href="/app/lawddy-logo.png" type="image/png">
+<link rel="stylesheet" href="/app/app.css">
+<script type="module" src="/app/app.mjs"></script>
 </head>
-<body>
-<main>
-  <h1>서울시 조례 묻고 답하기</h1>
-  <p class="lead">주차요금, 감면, 금연구역, 공원 이용 같은 궁금한 점을 쉬운 말로 물어보세요. 답과 함께 근거 조항을 보여 드립니다.</p>
-  <p class="notice" id="scope-notice">서울특별시 조례 6종(주차장 설치 및 관리 조례, 금연환경 조성 및 간접흡연 피해방지조례, 청년 기본 조례, 도시공원 조례, 동물보호 조례, 자전거이용 활성화에 관한 조례)의 2026-10-01 기준으로 시행 중인 내용만 안내하며, 법률 자문이 아닙니다. 정확한 내용은 근거 조항의 원문을 확인하세요.</p>
+<body class="view-home">
+<a class="skip" href="#main" data-i18n>본문 바로가기</a>
 
-  <form id="ask-form" autocomplete="off">
-    <label for="question">질문</label>
-    <textarea id="question" name="question" maxlength="2000" required
-              placeholder="예: 경차를 서울시 공영주차장에 세우면 주차요금이 할인되나요?"></textarea>
-    <div class="row">
-      <button type="submit" id="send">보내기</button>
-      <span class="hint">Enter로 보내기, Shift+Enter로 줄바꿈</span>
+<div class="util">
+  <div class="wrap util-inner">
+    <span data-i18n>서울특별시 조례 6종 안내 서비스</span>
+    <span class="util-asof"><span data-i18n>시행 기준일</span> <b id="asof">2026-10-01</b></span>
+  </div>
+</div>
+
+<header class="site-head">
+  <div class="wrap head-inner">
+    <a class="brand" href="/" id="brand">
+      <img class="brand-logo" src="/app/lawddy-logo.png" alt="" width="48" height="48">
+      <span class="brand-text">
+        <span class="brand-name">Lawddy</span>
+      </span>
+    </a>
+    <nav class="gnb" aria-label="주요 메뉴">
+      <a href="#search" data-home data-i18n>질문하기</a>
+      <a href="#topics" data-home data-i18n>분야별 질문</a>
+      <a href="#guide" data-home data-i18n>이용 안내</a>
+    </nav>
+    <label class="lang-pick"><span class="visually-hidden" data-i18n>언어</span><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 6h-2.95a15.7 15.7 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14a8.2 8.2 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26zm.81 2h2.95c.32 1.25.78 2.45 1.38 3.56A8 8 0 0 1 5.07 16zM8.02 8H5.07a8 8 0 0 1 4.33-3.56A15.7 15.7 0 0 0 8.02 8zM12 19.96A14.1 14.1 0 0 1 10.09 16h3.82A14.1 14.1 0 0 1 12 19.96zM14.34 14H9.66a14.7 14.7 0 0 1 0-4h4.68a14.7 14.7 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.2 8.2 0 0 1 0 4h-3.38z"/></svg><select id="lang"></select></label>
+  </div>
+</header>
+
+<div class="banner" id="health-banner" role="status" hidden></div>
+
+<main id="main">
+  <!-- 처음 화면 -->
+  <div class="home" id="home">
+    <section class="hero" id="search" aria-labelledby="hero-title">
+      <div class="wrap">
+        <p class="hero-kicker" data-i18n>서울시 조례 및 민원 AI 도우미 · Lawddy</p>
+        <h1 id="hero-title" class="hero-title"><span class="hero-line" data-hero="1">어려운 생활 속 조례,</span><br><span class="hero-line" data-hero="2">로디에게 물어보세요.</span></h1>
+        <p class="hero-lead" data-i18n>주차장, 금연구역, 청년 정책, 도시공원, 동물보호, 자전거 이용에 관한 서울특별시 조례 6종에서 근거 조항을 찾아 답변합니다.</p>
+        <form class="search" id="hero-form" autocomplete="off" role="search">
+          <label class="visually-hidden" for="hero-question" data-i18n>질문 입력</label>
+          <input id="hero-question" type="text" maxlength="2000" placeholder="예) 금연구역 과태료는 얼마인가요?" data-i18n-ph>
+          <button type="button" class="tool-btn voice-btn" data-target="hero-question" aria-label="말로 묻기" title="말로 묻기" data-i18n-aria hidden><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></button>
+          <button type="button" class="tool-btn photo-btn" data-target="hero-question" aria-label="사진으로 묻기" title="사진으로 묻기" data-i18n-aria><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg></button>
+          <button type="submit" class="search-btn" data-i18n>질문하기</button>
+        </form>
+        <div class="photo-panel" id="photo-panel-hero" hidden></div>
+        <p class="hero-note" data-i18n>조례 원문 기반 답변 · 근거 조항 및 출처 제공 · 글·말·사진으로 질문 · 5개 언어</p>
+        <a class="hero-explore" href="#topics"><b class="hero-explore-text" data-i18n>분야별 질문 살펴보기</b> <span aria-hidden="true">↓</span></a>
+      </div>
+    </section>
+
+    <section class="section" id="topics" aria-labelledby="topics-title">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="topics-title" data-i18n>분야별 자주 묻는 질문</h2>
+          <p data-i18n>질문을 누르면 바로 답변을 확인할 수 있습니다.</p>
+        </div>
+        <div class="groups" id="groups"></div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="guide" aria-labelledby="guide-title">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="guide-title" data-i18n>이용 안내</h2>
+          <p data-i18n>처음이라면 이렇게 써 보세요.</p>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-no">01</span>
+            <strong data-i18n>언어 고르기</strong>
+            <span data-i18n>오른쪽 위에서 한국어·English·中文·日本語 중 하나를 고르세요. 질문과 답이 그 언어로 나와요.</span>
+          </li>
+          <li>
+            <span class="step-no">02</span>
+            <strong data-i18n>글·말·사진으로 묻기</strong>
+            <span data-i18n>궁금한 걸 쓰거나, 마이크로 말하거나, 표지판을 찍으세요. 사진은 저장하지 않아요.</span>
+          </li>
+          <li>
+            <span class="step-no">03</span>
+            <strong data-i18n>근거와 함께 답 받기</strong>
+            <span data-i18n>서울시 조례 6종 원문에서 찾은 조항과 원문 링크를 보여 주고, 금액·나이 같은 숫자는 형광펜으로 표시해요.</span>
+          </li>
+          <li>
+            <span class="step-no">04</span>
+            <strong data-i18n>사람에게 묻기</strong>
+            <span data-i18n>더 필요한 건 120다산콜재단(02-120)에 물어보세요. 외국어 상담은 9번이에요.</span>
+          </li>
+        </ol>
+        <dl class="scope">
+          <div><dt data-i18n>대상 조례</dt><dd data-i18n>주차장 설치 및 관리 조례, 금연환경 조성 및 간접흡연 피해방지조례, 청년 기본 조례, 도시공원 조례, 동물보호 조례, 자전거이용 활성화에 관한 조례</dd></div>
+          <div><dt data-i18n>기준일</dt><dd data-i18n>2026-10-01 시행본</dd></div>
+          <div><dt data-i18n>자료 출처</dt><dd data-i18n>법제처 국가법령정보센터</dd></div>
+          <div><dt data-i18n>유의 사항</dt><dd data-i18n>본 서비스는 조례 안내를 돕는 참고 자료이며 법률 자문이 아닙니다. 정확한 내용은 근거 조항의 원문을 확인하세요.</dd></div>
+        </dl>
+      </div>
+    </section>
+  </div>
+
+  <!-- 질문 결과 화면 -->
+  <div class="qa" id="qa" hidden>
+    <div class="qa-bar">
+      <div class="wrap qa-bar-inner">
+        <button type="button" class="back" id="back">
+          <span class="back-arrow" aria-hidden="true"></span><span data-i18n>처음 화면으로</span>
+        </button>
+        <ol class="crumb" aria-label="현재 위치">
+          <li data-i18n>홈</li>
+          <li aria-current="page" data-i18n>질문 결과</li>
+        </ol>
+      </div>
     </div>
-  </form>
-
-  <section class="examples" aria-label="예시 질문">
-    <h2>예시 질문</h2>
-    <ul>
-      <li><button type="button" class="example" data-question="서울시 청년 기본 조례에서 말하는 청년은 몇 살부터 몇 살까지인가요?"><span class="tag">일반</span>청년은 몇 살부터 몇 살까지인가요?</button></li>
-      <li><button type="button" class="example" data-question="서울시 공영주차장 1급지 노상주차장 요금은 5분에 얼마인가요?"><span class="tag">요금·별표</span>1급지 노상주차장 요금은 5분에 얼마인가요?</button></li>
-      <li><button type="button" class="example" data-question="경차를 서울시 공영주차장에 세우면 주차요금이 할인되나요?"><span class="tag">감면 조건</span>경차는 공영주차장 요금이 할인되나요?</button></li>
-      <li><button type="button" class="example" data-question="장애인 할인과 다둥이 행복카드 할인을 공영주차장에서 둘 다 받을 수 있나요?"><span class="tag">여러 조항</span>장애인 할인과 다둥이 할인을 둘 다 받을 수 있나요?</button></li>
-      <li><button type="button" class="example" data-question="서울시 자전거주차장은 돈을 내야 하나요? 낸다면 얼마인가요?"><span class="tag">다른 규정으로 넘김</span>자전거주차장은 돈을 내야 하나요?</button></li>
-      <li><button type="button" class="example" data-question="서울시에서 자전거 탈 때 헬멧을 안 쓰면 과태료가 얼마인가요?"><span class="tag">조례에 없는 내용</span>자전거 헬멧을 안 쓰면 과태료가 있나요?</button></li>
-    </ul>
-  </section>
-
-  <div id="state" role="status" aria-live="polite"></div>
-
-  <section id="result" hidden aria-label="답변">
-    <p id="asked"></p>
-    <h2>답변</h2>
-    <div id="answer"></div>
-    <p id="reason"></p>
-    <h2 id="sources-title">근거 조항 <span class="hint">(누르면 법제처 원문이 새 탭에서 열립니다)</span></h2>
-    <ol id="sources"></ol>
-    <p id="asof"></p>
-  </section>
+    <div class="wrap qa-body">
+      <ol class="thread" id="thread" aria-label="질문과 답변" aria-live="polite"></ol>
+    </div>
+  </div>
 </main>
-<script>
-"use strict";
-/* ---- Response handling (no DOM). Mirrors sync_view in src/local_rag_service.py. ---- */
-var UNKNOWN = "확인 불가";
-var POLL_MS = 3000;
-var POLL_LIMIT_MS = 10 * 60 * 1000;
-var ASK_TIMEOUT_MS = 100 * 1000;  // the server answers a synchronous /ui/ask within about 80 seconds
-var JOB_PATH = /^\/jobs\/[0-9a-f]{64}$/;
 
-// GET /jobs/<id> returns the public job; turn it into the same shape as a synchronous /ui/ask body.
-function jobToView(job) {
-  var result = (job && job.result && typeof job.result === "object") ? job.result : {};
-  var response = result.response;
-  var status = job.status;
-  var view = { answer: UNKNOWN, citation: [], job_id: job.job_id };
-  if (status === "completed" && result.status === "processing_error") status = "processing_error";
-  if (status === "completed" && response && typeof response === "object" && typeof response.answer === "string") {
-    view.answer = response.answer;
-    view.citation = Array.isArray(response.citation) ? response.citation : [];
-    view.source_url = response.source_url;
-    view.effective_date = response.effective_date;
-  } else if (status === "queued" || status === "running") {
-    status = "deadline_exceeded";
-  }
-  view.status = status;
-  if ("sources" in result) view.sources = result.sources;
-  if ("as_of_date" in result) view.as_of_date = result.as_of_date;
-  if (job.poll_url) view.poll_url = job.poll_url;
-  if (job.message) view.message = job.message;
-  if (job.result) view.result = job.result;
-  return view;
-}
+<footer class="site-foot">
+  <div class="wrap foot-inner">
+    <p class="foot-name">Lawddy <span data-i18n>서울시 조례 및 민원 도우미</span></p>
+    <ul class="foot-info">
+      <li><span data-i18n>제작</span> <b data-i18n>팀 로디</b></li>
+      <li data-i18n>AI 부트캠프 해커톤 출품작</li>
+      <li data-i18n>자료 법제처 국가법령정보센터 (2026-10-01 시행본)</li>
+    </ul>
+    <p class="foot-note" data-i18n>본 서비스의 답변은 서울특별시 조례 6종에 근거한 안내이며 법적 효력이 없습니다. 근거를 찾지 못한 내용은 120다산콜재단(02-120) 또는 관할 구청에 문의하시기 바랍니다.</p>
+  </div>
+</footer>
 
-function pick(value, index, count) {
-  if (Array.isArray(value)) return value[index];
-  // A scalar is the first citation's value (sync_view); it is certain for the others only when there is one.
-  if (typeof value === "string" && (index === 0 || count === 1)) return value;
-  return undefined;
-}
+<div class="composer" id="composer">
+  <form class="wrap composer-inner" id="ask-form" autocomplete="off">
+    <label class="visually-hidden" for="question" data-i18n>추가 질문</label>
+    <textarea id="question" name="question" rows="1" maxlength="2000" placeholder="이어서 궁금한 점을 입력하세요" data-i18n-ph></textarea>
+    <button type="button" class="tool-btn voice-btn" data-target="question" aria-label="말로 묻기" title="말로 묻기" data-i18n-aria hidden><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></button>
+    <button type="button" class="tool-btn photo-btn" data-target="question" aria-label="사진으로 묻기" title="사진으로 묻기" data-i18n-aria><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg></button>
+    <button type="submit" class="send" id="send" data-i18n>질문하기</button>
+  </form>
+  <div class="wrap photo-panel" id="photo-panel-question" hidden></div>
+  <input type="file" id="photo-input" accept="image/*" hidden>
+</div>
 
-// Citation list: sources[] when present, otherwise the top-level citation/source_url/effective_date.
-function citationItems(view) {
-  var citations = Array.isArray(view.citation) ? view.citation.filter(function (c) { return typeof c === "string"; }) : [];
-  if (!citations.length) return [];
-  if (Array.isArray(view.sources) && view.sources.length) {
-    var items = view.sources.filter(function (s) { return s && typeof s.citation === "string"; })
-      .map(function (s) { return { label: s.citation, url: s.source_url, date: s.effective_date }; });
-    if (items.length) return items;
-  }
-  return citations.map(function (c, i) {
-    return { label: c, url: pick(view.source_url, i, citations.length), date: pick(view.effective_date, i, citations.length) };
-  });
-}
+<!-- 화면 조각들. app.mjs가 복제해서 글자만 채웁니다(답 문장은 textContent로만 넣음). -->
+<template id="tpl-user">
+  <li class="msg msg-user"><p class="q-label" data-i18n>질문</p><p class="bubble"></p><p class="q-korean" hidden></p></li>
+</template>
 
-function safeUrl(url) {
-  return (typeof url === "string" && url.indexOf("https://") === 0) ? url : null;
-}
+<template id="tpl-pending">
+  <li class="msg msg-bot">
+    <div class="pending" role="status">
+      <span class="pending-bar" aria-hidden="true"></span>
+      <span class="pending-row">
+        <span class="pending-text" data-i18n>조례에서 근거 조항을 찾고 있습니다</span>
+        <span class="pending-time"></span>
+      </span>
+    </div>
+  </li>
+</template>
 
-// What the page shows for one /ui/ask (or /jobs) body. `kind`: answer | unknown | poll | retry | error.
-function classify(view, httpStatus) {
-  var status = view && typeof view.status === "string" ? view.status : "";
-  if (httpStatus >= 400 && !(view && view.job_id)) {
-    var codes = {
-      invalid_question: "질문을 입력해 주세요. 너무 긴 질문은 줄여 주세요.",
-      request_too_large: "질문이 너무 깁니다. 줄여서 다시 보내 주세요.",
-      local_origin_required: "이 주소에서는 질문을 보낼 수 없습니다. 서비스 주소로 직접 접속해 주세요.",
-      job_not_found: "진행 중이던 질문을 찾을 수 없습니다. 다시 보내 주세요."
-    };
-    return { kind: "error", text: codes[status] || ("요청을 처리하지 못했습니다(HTTP " + httpStatus + "). 잠시 후 다시 시도해 주세요.") };
-  }
-  if (status === "completed") {
-    if (citationItems(view).length) return { kind: "answer", text: "" };
-    // Empty citations are either "no basis" or a held draft; the server message says which.
-    var resultStatus = view.result && typeof view.result.status === "string" ? view.result.status : "";
-    if (resultStatus === "out_of_scope" || resultStatus === "insufficient_evidence") {
-      return { kind: "unknown", text: "서울시 조례 6종에서 이 질문에 대한 근거 조항을 확인하지 못했습니다(확인 불가)." };
-    }
-    return { kind: "unknown", text: "이 질문은 지금 답을 확정하지 못했습니다(확인 불가)." };
-  }
-  if (status === "deadline_exceeded") {
-    if (typeof view.poll_url === "string" && JOB_PATH.test(view.poll_url)) {
-      return { kind: "poll", text: "답을 만드는 데 시간이 더 걸리고 있습니다. 3초마다 결과를 확인합니다." };
-    }
-    return { kind: "retry", text: "답이 늦어지고 있습니다. 잠시 후 같은 질문을 다시 보내 주세요." };
-  }
-  if (status === "queue_full") return { kind: "retry", text: "지금 질문이 많아 대기열이 가득 찼습니다. 잠시 후 다시 보내 주세요." };
-  if (status === "interrupted") return { kind: "retry", text: "이전 처리가 중단되었습니다. 잠시 후 같은 질문을 다시 보내 주세요." };
-  if (status === "failed" || status === "processing_error") {
-    return { kind: "retry", text: "처리 중 오류가 발생했습니다. 근거가 없다는 뜻은 아닙니다. 잠시 후 다시 보내 주세요." };
-  }
-  return { kind: "retry", text: "답을 받지 못했습니다. 잠시 후 다시 보내 주세요." };
-}
+<template id="tpl-answer">
+  <li class="msg msg-bot">
+    <article class="reply">
+      <header class="reply-head">
+        <span class="reply-kind"></span>
+        <span class="reply-meta"></span>
+      </header>
+      <div class="reply-body">
+        <p class="answer"></p>
+        <p class="answer-note" hidden></p>
+        <button type="button" class="original-toggle" hidden></button>
+        <p class="answer-original" lang="ko" hidden></p>
+        <div class="reason" hidden></div>
+        <section class="sources" hidden>
+          <h3 class="sources-title" data-i18n>근거 조항</h3>
+          <ol class="source-list"></ol>
+          <button type="button" class="source-text-open" data-i18n>조문 원문 펼쳐 보기</button>
+          <div class="source-texts" hidden></div>
+        </section>
+      </div>
+      <footer class="reply-foot">
+        <p class="verified" hidden data-i18n>조항 이름과 시행일은 법제처 원문 데이터에서 그대로 가져왔습니다.</p>
+        <div class="foot-actions">
+          <button type="button" class="draft-open" hidden data-i18n>민원 초안 쓰기</button>
+          <button type="button" class="copy"><span class="copy-text" data-i18n>답변 복사</span></button>
+        </div>
+      </footer>
+    </article>
+  </li>
+</template>
 
-/* ---- Page ---- */
-(function () {
-  if (typeof document === "undefined") return;
-  var form = document.getElementById("ask-form");
-  var input = document.getElementById("question");
-  var send = document.getElementById("send");
-  var examples = Array.prototype.slice.call(document.querySelectorAll(".example"));
-  var state = document.getElementById("state");
-  var resultBox = document.getElementById("result");
-  var asked = document.getElementById("asked");
-  var answer = document.getElementById("answer");
-  var reason = document.getElementById("reason");
-  var sourcesTitle = document.getElementById("sources-title");
-  var sources = document.getElementById("sources");
-  var asof = document.getElementById("asof");
-  var busy = false, started = 0, ticker = null, waitingText = "";
+<template id="tpl-draft">
+  <section class="draft" aria-label="민원 초안">
+    <h3 class="draft-title">민원 초안 쓰기</h3>
+    <p class="draft-lead">이 질문과 확인된 근거로 AI가 민원 글 초안을 써 드려요. 상황을 적으면 더 구체적으로 써요.</p>
+    <label class="draft-label">겪은 상황 (선택)
+      <textarea class="draft-details" rows="3" maxlength="1000" placeholder="예) 11월 20일 저녁 7시쯤 ○○공원 놀이터 옆 벤치에서 담배를 피우는 사람이 있었어요."></textarea>
+    </label>
+    <p class="draft-privacy">이름·연락처·주소 같은 개인정보는 적지 마세요. 신청 사이트에서 직접 입력합니다.</p>
+    <button type="button" class="draft-make">AI로 초안 만들기</button>
+    <p class="draft-status" role="status" hidden></p>
+    <div class="draft-result" hidden>
+      <p class="draft-notice" hidden></p>
+      <label class="draft-label">초안 (고쳐 써도 돼요)
+        <textarea class="draft-body" rows="14"></textarea>
+      </label>
+      <div class="draft-actions">
+        <button type="button" class="draft-copy">초안 복사</button>
+      </div>
+      <p class="draft-howto">복사한 뒤 아래 사이트에서 로그인하고 민원 신청서의 제목·내용에 붙여 넣으세요.</p>
+      <ul class="draft-sites"></ul>
+    </div>
+  </section>
+</template>
 
-  function setState(text, tone) {
-    state.className = tone || "info";
-    state.textContent = text;
-  }
-  function elapsed() { return Math.floor((Date.now() - started) / 1000); }
-  function tick() { setState(waitingText + " (경과 " + elapsed() + "초)", "info"); }
-  function setBusy(value) {
-    busy = value;
-    send.disabled = value;
-    examples.forEach(function (b) { b.disabled = value; });
-    if (value) {
-      started = Date.now();
-      ticker = setInterval(tick, 250);
-    } else if (ticker) {
-      clearInterval(ticker);
-      ticker = null;
-    }
-  }
-  function clearResult() {
-    resultBox.hidden = true;
-    answer.textContent = "";
-    reason.textContent = "";
-    sources.textContent = "";
-    asof.textContent = "";
-  }
-  function showResult(question, view, info) {
-    asked.textContent = "질문: " + question;
-    answer.textContent = typeof view.answer === "string" ? view.answer : UNKNOWN;
-    var resultMessage = view.result && typeof view.result.message === "string" ? view.result.message : "";
-    reason.textContent = info.kind === "unknown" ? info.text + (resultMessage ? " " + resultMessage : "") : "";
-    sources.textContent = "";
-    var items = info.kind === "answer" ? citationItems(view) : [];
-    items.forEach(function (item) {
-      var li = document.createElement("li");
-      var url = safeUrl(item.url);
-      var label = document.createElement(url ? "a" : "span");
-      label.textContent = item.label;
-      if (url) {
-        label.href = url;
-        label.target = "_blank";
-        label.rel = "noopener noreferrer";
-      }
-      li.appendChild(label);
-      if (typeof item.date === "string" && item.date) {
-        var date = document.createElement("span");
-        date.className = "date";
-        date.textContent = "시행 " + item.date;
-        li.appendChild(date);
-      }
-      sources.appendChild(li);
-    });
-    sourcesTitle.hidden = items.length === 0;
-    sources.hidden = items.length === 0;
-    asof.textContent = typeof view.as_of_date === "string" ? "기준일 " + view.as_of_date : "";
-    resultBox.hidden = false;
-  }
+<template id="tpl-help">
+  <aside class="help120">
+    <p class="help120-title" data-i18n>사람에게 물어보고 싶다면</p>
+    <p class="help120-text" data-i18n>120다산콜재단에 전화하면 서울시 담당 부서를 안내받을 수 있어요. 휴대폰은 02-120, 외국어 상담(영어·중국어·일본어·베트남어·몽골어)은 9번, 평일 오전 9시~오후 6시예요.</p>
+    <a class="help120-call" href="tel:+82-2-120" data-i18n>02-120 전화하기</a>
+  </aside>
+</template>
 
-  function pageError() {
-    setBusy(false);
-    setState("화면 처리 중 오류가 발생했습니다. 다시 보내 주세요.", "bad");
-  }
+<template id="tpl-source">
+  <li>
+    <a class="source" target="_blank" rel="noopener noreferrer">
+      <span class="plate"><span class="plate-art"></span><span class="plate-sub"></span></span>
+      <span class="source-text">
+        <span class="source-law"></span>
+        <span class="source-date"></span>
+      </span>
+      <span class="source-open" data-i18n>원문 보기</span>
+    </a>
+  </li>
+</template>
 
-  function readJson(response) {
-    return response.text().then(function (text) {
-      try { return JSON.parse(text); } catch (e) { return null; }
-    });
-  }
-
-  function finish(question, view, httpStatus) {
-    var info = classify(view, httpStatus);
-    if (info.kind === "poll") return poll(question, view.poll_url);
-    setBusy(false);
-    var seconds = elapsed();
-    if (info.kind === "answer" || info.kind === "unknown") {
-      setState(info.kind === "answer" ? "답변을 받았습니다 (" + seconds + "초)." : info.text, info.kind === "answer" ? "info" : "warn");
-      showResult(question, view, info);
-    } else {
-      setState(info.text, info.kind === "error" ? "bad" : "warn");
-    }
-  }
-
-  function poll(question, url) {
-    waitingText = "답을 만드는 데 시간이 더 걸리고 있습니다. 3초마다 결과를 확인합니다";
-    tick();
-    if (Date.now() - started > POLL_LIMIT_MS) {
-      setBusy(false);
-      setState("답이 너무 늦어지고 있습니다. 잠시 후 같은 질문을 다시 보내 주세요.", "warn");
-      return;
-    }
-    setTimeout(function () {
-      fetch(url, { method: "GET", cache: "no-store", credentials: "omit" }).then(function (response) {
-        return readJson(response).then(function (body) {
-          if (body && body.job_id) return finish(question, jobToView(body), response.status);
-          return finish(question, body || {}, response.status >= 400 ? response.status : 500);
-        });
-      }, function () {
-        // Network hiccup while waiting: keep checking until the time limit.
-        poll(question, url);
-      }).catch(pageError);
-    }, POLL_MS);
-  }
-
-  function ask(question) {
-    question = question.trim();
-    if (busy) return;
-    if (!question) { setState("질문을 입력해 주세요.", "warn"); input.focus(); return; }
-    clearResult();
-    waitingText = "답을 찾는 중입니다. 보통 수십 초 걸립니다";
-    setBusy(true);
-    tick();
-    var controller = typeof AbortController === "function" ? new AbortController() : null;
-    var timer = controller ? setTimeout(function () { controller.abort(); }, ASK_TIMEOUT_MS) : null;
-    fetch("/ui/ask", { method: "POST", cache: "no-store", credentials: "omit",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ question: question }),
-                    signal: controller ? controller.signal : undefined }).then(function (response) {
-      return readJson(response).then(function (body) {
-        clearTimeout(timer);
-        if (body === null) return finish(question, {}, response.status >= 400 ? response.status : 500);
-        return finish(question, body, response.status);
-      });
-    }, function (error) {
-      clearTimeout(timer);
-      setBusy(false);
-      if (error && error.name === "AbortError") {
-        setState("응답이 너무 오래 걸립니다. 잠시 후 같은 질문을 다시 보내 주세요.", "warn");
-      } else {
-        setState("서버에 연결하지 못했습니다. 네트워크를 확인하고 잠시 후 다시 보내 주세요.", "bad");
-      }
-    }).catch(function () {
-      clearTimeout(timer);
-      pageError();
-    });
-  }
-
-  form.addEventListener("submit", function (event) {
-    event.preventDefault();
-    ask(input.value);
-  });
-  input.addEventListener("keydown", function (event) {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
-      event.preventDefault();
-      ask(input.value);
-    }
-  });
-  examples.forEach(function (button) {
-    button.addEventListener("click", function () {
-      if (busy) return;
-      input.value = button.getAttribute("data-question");
-      ask(input.value);
-    });
-  });
-})();
-</script>
+<template id="tpl-notice">
+  <li class="msg msg-bot">
+    <div class="notice">
+      <p class="notice-title"></p>
+      <p class="notice-text"></p>
+      <button type="button" class="retry" data-i18n>다시 보내기</button>
+    </div>
+  </li>
+</template>
 </body>
 </html>

@@ -27,7 +27,10 @@ ENDPOINTS = {"embedding": "https://api.upstage.ai/v1/embeddings",
              "gate": "https://api.upstage.ai/v1/chat/completions",
              "draft": "https://api.upstage.ai/v1/chat/completions",
              "verify": "https://api.upstage.ai/v1/chat/completions",
-             "provision_check": "https://api.upstage.ai/v1/chat/completions"}
+             "provision_check": "https://api.upstage.ai/v1/chat/completions",
+             "complaint": "https://api.upstage.ai/v1/chat/completions",
+             "photo_question": "https://api.upstage.ai/v1/chat/completions",
+             "translate": "https://api.upstage.ai/v1/chat/completions"}
 
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 180

@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>서울시 조례 묻고 답하기</title>
+<style>
+  :root { color-scheme: light; --ink: #1d2433; --muted: #5b6475; --line: #d8dde6; --accent: #1f5fbf;
+          --soft: #f3f6fb; --warn-bg: #fff6e0; --warn-ink: #6b4b00; --bad-bg: #fdecec; --bad-ink: #8a1f1f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+         color: var(--ink); background: #fff; line-height: 1.6; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 16px; }
+  .notice { font-size: 0.9rem; color: var(--muted); background: var(--soft); border-radius: 8px; padding: 8px 12px; margin: 0 0 16px; }
+  form { display: flex; flex-direction: column; gap: 8px; }
+  label { font-weight: 600; }
+  textarea { width: 100%; min-height: 84px; padding: 10px 12px; font: inherit; border: 1px solid var(--line);
+             border-radius: 8px; resize: vertical; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; }
+  button:disabled { cursor: not-allowed; opacity: 0.55; }
+  #send { background: var(--accent); color: #fff; border: 0; padding: 8px 22px; font-weight: 600; }
+  .hint { font-size: 0.85rem; color: var(--muted); }
+  .examples { margin: 18px 0 8px; }
+  .examples h2 { font-size: 1rem; margin: 0 0 8px; }
+  .examples ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .examples button { background: #fff; border: 1px solid var(--line); padding: 6px 12px; text-align: left; }
+  .examples button:hover:not(:disabled) { border-color: var(--accent); }
+  .tag { display: inline-block; font-size: 0.75rem; color: var(--accent); margin-right: 6px; }
+  #state { margin-top: 20px; padding: 10px 12px; border-radius: 8px; }
+  #state:empty { display: none; }
+  #state.info { background: var(--soft); }
+  #state.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  #state.bad { background: var(--bad-bg); color: var(--bad-ink); }
+  #result[hidden] { display: none; }
+  #result { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  #result h2 { font-size: 1rem; margin: 0 0 6px; }
+  #asked { color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #answer { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 14px; }
+  #reason { font-size: 0.9rem; color: var(--muted); margin: 0 0 12px; }
+  #reason:empty { display: none; }
+  #sources { padding-left: 20px; margin: 0; }
+  #sources li { margin-bottom: 6px; overflow-wrap: anywhere; }
+  #sources a { color: var(--accent); }
+  .date { color: var(--muted); font-size: 0.85rem; margin-left: 6px; white-space: nowrap; }
+  #asof { color: var(--muted); font-size: 0.8rem; margin: 12px 0 0; }
+  #asof:empty { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>서울시 조례 묻고 답하기</h1>
+  <p class="lead">주차요금, 감면, 금연구역, 공원 이용 같은 궁금한 점을 쉬운 말로 물어보세요. 답과 함께 근거 조항을 보여 드립니다.</p>
+  <p class="notice" id="scope-notice">서울특별시 조례 6종(주차장 설치 및 관리 조례, 금연환경 조성 및 간접흡연 피해방지조례, 청년 기본 조례, 도시공원 조례, 동물보호 조례, 자전거이용 활성화에 관한 조례)의 2026-10-01 기준으로 시행 중인 내용만 안내하며, 법률 자문이 아닙니다. 정확한 내용은 근거 조항의 원문을 확인하세요.</p>
+
+  <form id="ask-form" autocomplete="off">
+    <label for="question">질문</label>
+    <textarea id="question" name="question" maxlength="2000" required
+              placeholder="예: 경차를 서울시 공영주차장에 세우면 주차요금이 할인되나요?"></textarea>
+    <div class="row">
+      <button type="submit" id="send">보내기</button>
+      <span class="hint">Enter로 보내기, Shift+Enter로 줄바꿈</span>
+    </div>
+  </form>
+
+  <section class="examples" aria-label="예시 질문">
+    <h2>예시 질문</h2>
+    <ul>
+      <li><button type="button" class="example" data-question="서울시 청년 기본 조례에서 말하는 청년은 몇 살부터 몇 살까지인가요?"><span class="tag">일반</span>청년은 몇 살부터 몇 살까지인가요?</button></li>
+      <li><button type="button" class="example" data-question="서울시 공영주차장 1급지 노상주차장 요금은 5분에 얼마인가요?"><span class="tag">요금·별표</span>1급지 노상주차장 요금은 5분에 얼마인가요?</button></li>
+      <li><button type="button" class="example" data-question="경차를 서울시 공영주차장에 세우면 주차요금이 할인되나요?"><span class="tag">감면 조건</span>경차는 공영주차장 요금이 할인되나요?</button></li>
+      <li><button type="button" class="example" data-question="장애인 할인과 다둥이 행복카드 할인을 공영주차장에서 둘 다 받을 수 있나요?"><span class="tag">여러 조항</span>장애인 할인과 다둥이 할인을 둘 다 받을 수 있나요?</button></li>
+      <li><button type="button" class="example" data-question="서울시 자전거주차장은 돈을 내야 하나요? 낸다면 얼마인가요?"><span class="tag">다른 규정으로 넘김</span>자전거주차장은 돈을 내야 하나요?</button></li>
+      <li><button type="button" class="example" data-question="서울시에서 자전거 탈 때 헬멧을 안 쓰면 과태료가 얼마인가요?"><span class="tag">조례에 없는 내용</span>자전거 헬멧을 안 쓰면 과태료가 있나요?</button></li>
+    </ul>
+  </section>
+
+  <div id="state" role="status" aria-live="polite"></div>
+
+  <section id="result" hidden aria-label="답변">
+    <p id="asked"></p>
+    <h2>답변</h2>
+    <div id="answer"></div>
+    <p id="reason"></p>
+    <h2 id="sources-title">근거 조항 <span class="hint">(누르면 법제처 원문이 새 탭에서 열립니다)</span></h2>
+    <ol id="sources"></ol>
+    <p id="asof"></p>
+  </section>
+</main>
+<script>
+"use strict";
+/* ---- Response handling (no DOM). Mirrors sync_view in src/local_rag_service.py. ---- */
+var UNKNOWN = "확인 불가";
+var POLL_MS = 3000;
+var POLL_LIMIT_MS = 10 * 60 * 1000;
+var ASK_TIMEOUT_MS = 100 * 1000;  // the server answers a synchronous /ui/ask within about 80 seconds
+var JOB_PATH = /^\/jobs\/[0-9a-f]{64}$/;
+
+// GET /jobs/<id> returns the public job; turn it into the same shape as a synchronous /ui/ask body.
+function jobToView(job) {
+  var result = (job && job.result && typeof job.result === "object") ? job.result : {};
+  var response = result.response;
+  var status = job.status;
+  var view = { answer: UNKNOWN, citation: [], job_id: job.job_id };
+  if (status === "completed" && result.status === "processing_error") status = "processing_error";
+  if (status === "completed" && response && typeof response === "object" && typeof response.answer === "string") {
+    view.answer = response.answer;
+    view.citation = Array.isArray(response.citation) ? response.citation : [];
+    view.source_url = response.source_url;
+    view.effective_date = response.effective_date;
+  } else if (status === "queued" || status === "running") {
+    status = "deadline_exceeded";
+  }
+  view.status = status;
+  if ("sources" in result) view.sources = result.sources;
+  if ("as_of_date" in result) view.as_of_date = result.as_of_date;
+  if (job.poll_url) view.poll_url = job.poll_url;
+  if (job.message) view.message = job.message;
+  if (job.result) view.result = job.result;
+  return view;
+}
+
+function pick(value, index, count) {
+  if (Array.isArray(value)) return value[index];
+  // A scalar is the first citation's value (sync_view); it is certain for the others only when there is one.
+  if (typeof value === "string" && (index === 0 || count === 1)) return value;
+  return undefined;
+}
+
+// Citation list: sources[] when present, otherwise the top-level citation/source_url/effective_date.
+function citationItems(view) {
+  var citations = Array.isArray(view.citation) ? view.citation.filter(function (c) { return typeof c === "string"; }) : [];
+  if (!citations.length) return [];
+  if (Array.isArray(view.sources) && view.sources.length) {
+    var items = view.sources.filter(function (s) { return s && typeof s.citation === "string"; })
+      .map(function (s) { return { label: s.citation, url: s.source_url, date: s.effective_date }; });
+    if (items.length) return items;
+  }
+  return citations.map(function (c, i) {
+    return { label: c, url: pick(view.source_url, i, citations.length), date: pick(view.effective_date, i, citations.length) };
+  });
+}
+
+function safeUrl(url) {
+  return (typeof url === "string" && url.indexOf("https://") === 0) ? url : null;
+}
+
+// What the page shows for one /ui/ask (or /jobs) body. `kind`: answer | unknown | poll | retry | error.
+function classify(view, httpStatus) {
+  var status = view && typeof view.status === "string" ? view.status : "";
+  if (httpStatus >= 400 && !(view && view.job_id)) {
+    var codes = {
+      invalid_question: "질문을 입력해 주세요. 너무 긴 질문은 줄여 주세요.",
+      request_too_large: "질문이 너무 깁니다. 줄여서 다시 보내 주세요.",
+      local_origin_required: "이 주소에서는 질문을 보낼 수 없습니다. 서비스 주소로 직접 접속해 주세요.",
+      job_not_found: "진행 중이던 질문을 찾을 수 없습니다. 다시 보내 주세요."
+    };
+    return { kind: "error", text: codes[status] || ("요청을 처리하지 못했습니다(HTTP " + httpStatus + "). 잠시 후 다시 시도해 주세요.") };
+  }
+  if (status === "completed") {
+    if (citationItems(view).length) return { kind: "answer", text: "" };
+    // Empty citations are either "no basis" or a held draft; the server message says which.
+    var resultStatus = view.result && typeof view.result.status === "string" ? view.result.status : "";
+    if (resultStatus === "out_of_scope" || resultStatus === "insufficient_evidence") {
+      return { kind: "unknown", text: "서울시 조례 6종에서 이 질문에 대한 근거 조항을 확인하지 못했습니다(확인 불가)." };
+    }
+    return { kind: "unknown", text: "이 질문은 지금 답을 확정하지 못했습니다(확인 불가)." };
+  }
+  if (status === "deadline_exceeded") {
+    if (typeof view.poll_url === "string" && JOB_PATH.test(view.poll_url)) {
+      return { kind: "poll", text: "답을 만드는 데 시간이 더 걸리고 있습니다. 3초마다 결과를 확인합니다." };
+    }
+    return { kind: "retry", text: "답이 늦어지고 있습니다. 잠시 후 같은 질문을 다시 보내 주세요." };
+  }
+  if (status === "queue_full") return { kind: "retry", text: "지금 질문이 많아 대기열이 가득 찼습니다. 잠시 후 다시 보내 주세요." };
+  if (status === "interrupted") return { kind: "retry", text: "이전 처리가 중단되었습니다. 잠시 후 같은 질문을 다시 보내 주세요." };
+  if (status === "failed" || status === "processing_error") {
+    return { kind: "retry", text: "처리 중 오류가 발생했습니다. 근거가 없다는 뜻은 아닙니다. 잠시 후 다시 보내 주세요." };
+  }
+  return { kind: "retry", text: "답을 받지 못했습니다. 잠시 후 다시 보내 주세요." };
+}
+
+/* ---- Page ---- */
+(function () {
+  if (typeof document === "undefined") return;
+  var form = document.getElementById("ask-form");
+  var input = document.getElementById("question");
+  var send = document.getElementById("send");
+  var examples = Array.prototype.slice.call(document.querySelectorAll(".example"));
+  var state = document.getElementById("state");
+  var resultBox = document.getElementById("result");
+  var asked = document.getElementById("asked");
+  var answer = document.getElementById("answer");
+  var reason = document.getElementById("reason");
+  var sourcesTitle = document.getElementById("sources-title");
+  var sources = document.getElementById("sources");
+  var asof = document.getElementById("asof");
+  var busy = false, started = 0, ticker = null, waitingText = "";
+
+  function setState(text, tone) {
+    state.className = tone || "info";
+    state.textContent = text;
+  }
+  function elapsed() { return Math.floor((Date.now() - started) / 1000); }
+  function tick() { setState(waitingText + " (경과 " + elapsed() + "초)", "info"); }
+  function setBusy(value) {
+    busy = value;
+    send.disabled = value;
+    examples.forEach(function (b) { b.disabled = value; });
+    if (value) {
+      started = Date.now();
+      ticker = setInterval(tick, 250);
+    } else if (ticker) {
+      clearInterval(ticker);
+      ticker = null;
+    }
+  }
+  function clearResult() {
+    resultBox.hidden = true;
+    answer.textContent = "";
+    reason.textContent = "";
+    sources.textContent = "";
+    asof.textContent = "";
+  }
+  function showResult(question, view, info) {
+    asked.textContent = "질문: " + question;
+    answer.textContent = typeof view.answer === "string" ? view.answer : UNKNOWN;
+    var resultMessage = view.result && typeof view.result.message === "string" ? view.result.message : "";
+    reason.textContent = info.kind === "unknown" ? info.text + (resultMessage ? " " + resultMessage : "") : "";
+    sources.textContent = "";
+    var items = info.kind === "answer" ? citationItems(view) : [];
+    items.forEach(function (item) {
+      var li = document.createElement("li");
+      var url = safeUrl(item.url);
+      var label = document.createElement(url ? "a" : "span");
+      label.textContent = item.label;
+      if (url) {
+        label.href = url;
+        label.target = "_blank";
+        label.rel = "noopener noreferrer";
+      }
+      li.appendChild(label);
+      if (typeof item.date === "string" && item.date) {
+        var date = document.createElement("span");
+        date.className = "date";
+        date.textContent = "시행 " + item.date;
+        li.appendChild(date);
+      }
+      sources.appendChild(li);
+    });
+    sourcesTitle.hidden = items.length === 0;
+    sources.hidden = items.length === 0;
+    asof.textContent = typeof view.as_of_date === "string" ? "기준일 " + view.as_of_date : "";
+    resultBox.hidden = false;
+  }
+
+  function pageError() {
+    setBusy(false);
+    setState("화면 처리 중 오류가 발생했습니다. 다시 보내 주세요.", "bad");
+  }
+
+  function readJson(response) {
+    return response.text().then(function (text) {
+      try { return JSON.parse(text); } catch (e) { return null; }
+    });
+  }
+
+  function finish(question, view, httpStatus) {
+    var info = classify(view, httpStatus);
+    if (info.kind === "poll") return poll(question, view.poll_url);
+    setBusy(false);
+    var seconds = elapsed();
+    if (info.kind === "answer" || info.kind === "unknown") {
+      setState(info.kind === "answer" ? "답변을 받았습니다 (" + seconds + "초)." : info.text, info.kind === "answer" ? "info" : "warn");
+      showResult(question, view, info);
+    } else {
+      setState(info.text, info.kind === "error" ? "bad" : "warn");
+    }
+  }
+
+  function poll(question, url) {
+    waitingText = "답을 만드는 데 시간이 더 걸리고 있습니다. 3초마다 결과를 확인합니다";
+    tick();
+    if (Date.now() - started > POLL_LIMIT_MS) {
+      setBusy(false);
+      setState("답이 너무 늦어지고 있습니다. 잠시 후 같은 질문을 다시 보내 주세요.", "warn");
+      return;
+    }
+    setTimeout(function () {
+      fetch(url, { method: "GET", cache: "no-store", credentials: "omit" }).then(function (response) {
+        return readJson(response).then(function (body) {
+          if (body && body.job_id) return finish(question, jobToView(body), response.status);
+          return finish(question, body || {}, response.status >= 400 ? response.status : 500);
+        });
+      }, function () {
+        // Network hiccup while waiting: keep checking until the time limit.
+        poll(question, url);
+      }).catch(pageError);
+    }, POLL_MS);
+  }
+
+  function ask(question) {
+    question = question.trim();
+    if (busy) return;
+    if (!question) { setState("질문을 입력해 주세요.", "warn"); input.focus(); return; }
+    clearResult();
+    waitingText = "답을 찾는 중입니다. 보통 수십 초 걸립니다";
+    setBusy(true);
+    tick();
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, ASK_TIMEOUT_MS) : null;
+    fetch("/ui/ask", { method: "POST", cache: "no-store", credentials: "omit",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ question: question }),
+                    signal: controller ? controller.signal : undefined }).then(function (response) {
+      return readJson(response).then(function (body) {
+        clearTimeout(timer);
+        if (body === null) return finish(question, {}, response.status >= 400 ? response.status : 500);
+        return finish(question, body, response.status);
+      });
+    }, function (error) {
+      clearTimeout(timer);
+      setBusy(false);
+      if (error && error.name === "AbortError") {
+        setState("응답이 너무 오래 걸립니다. 잠시 후 같은 질문을 다시 보내 주세요.", "warn");
+      } else {
+        setState("서버에 연결하지 못했습니다. 네트워크를 확인하고 잠시 후 다시 보내 주세요.", "bad");
+      }
+    }).catch(function () {
+      clearTimeout(timer);
+      pageError();
+    });
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    ask(input.value);
+  });
+  input.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      ask(input.value);
+    }
+  });
+  examples.forEach(function (button) {
+    button.addEventListener("click", function () {
+      if (busy) return;
+      input.value = button.getAttribute("data-question");
+      ask(input.value);
+    });
+  });
+})();
+</script>
+</body>
+</html>
