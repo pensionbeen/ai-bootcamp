@@ -5,6 +5,8 @@ from pathlib import Path
 
 import local_rag_answer as rag
 from benefit_selection import benefit_evidence
+from benefit_procedure import unmatched_benefit_procedure
+from scoped_benefit_answer import scoped_benefit_answer
 from complete_selected_evidence import _amount_companions
 from delegated_fee_answer import delegated_fee_answer
 from partial_benefit_answer import partial_benefit
@@ -101,7 +103,8 @@ def _fee_schedule(question, rows):
 def resolve(question, rows):
     if not rows:
         return None
-    plan = (benefit_evidence(question, rows) or tariff_evidence(question, rows) or _fee_schedule(question, rows)
+    plan = (benefit_evidence(question, rows) or scoped_benefit_answer(question, rows)
+            or tariff_evidence(question, rows) or _fee_schedule(question, rows)
             or partial_benefit(question, rows) or simple_source_answer(question, rows)
             or delegated_fee_answer(question, rows) or referenced_publicity_answer(question, rows))
     if plan and plan["kind"] == "single_benefit" and plan["answer"] is None:
@@ -134,11 +137,17 @@ def public_preview(plan, rows):
 
 
 def prepare_draft(question, citations, originals, crosswalk, project, expanded, units, primaries, conditions):
-    if not re.search(r"할인|감면|면제|과태료|점용료|야간|주간|전일|요금|이용료|돈을 내|수당|지원금|장려금|보조금|축하금|공개", question):
+    if not re.search(r"할인|감면|면제|깎|과태료|점용료|야간|주간|전일|요금|이용료|돈을 내|수당|지원금|장려금|보조금|축하금|공개", question):
         return None
     try:
         rows, _ = candidate_rows(citations, originals, expanded, units, primaries, conditions,
                                  project or Path(__file__).resolve().parents[1])
+        conflicting = unmatched_benefit_procedure(question, originals, conditions)
+        if conflicting:
+            draft = {"decision": "insufficient_evidence", "missing_information": [], "missing_materials": [],
+                     "claims": [], "calculations": []}
+            return draft, {"kind": "unidentified_benefit_procedure", "candidate_count": len(rows),
+                           "competing_provisions": conflicting, "used_unit_ids": [], "draft_model_called": False}
         plan = resolve(question, rows)
     except (OSError, ValueError, KeyError):
         # Optional source routing cannot authorize an answer on incomplete or
