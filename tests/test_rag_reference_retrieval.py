@@ -386,6 +386,7 @@ class QuestionForwardingTests(unittest.TestCase):
                 "public_rag_response": types.SimpleNamespace(__file__=search.__file__),
                 "rag_numeric_amounts": types.SimpleNamespace(__file__=search.__file__),
                 "release_policy": types.SimpleNamespace(__file__=search.__file__),
+                **{name: types.SimpleNamespace(__file__=search.__file__) for name in ask_local_rag.SOURCE_SELECTION_MODULES},
             }
             client = types.SimpleNamespace(called=0, calls=[], request=Mock(return_value=(
                 {"model": "solar-embedding-2-query", "data": [{"index": 0, "embedding": vector()}]}, {})))

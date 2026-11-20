@@ -92,6 +92,10 @@ def won_literals(text, *, expression=False):
     for match in _CANDIDATE.finditer(text):
         if any(match.start() < literal["end"] and match.end() > literal["start"] for literal in literals):
             continue
+        # In prose, punctuation before a word beginning with 원 has no numeric
+        # component. Keep malformed digit groups, scales and ranges observable.
+        if not expression and not match[1].strip(".,") and not match[0].endswith("원원"):
+            continue
         try:
             if match[0].endswith("원원") or (match.end() < len(text) and text[match.end()].isdigit()):
                 raise ValueError("invalid_won_literal")

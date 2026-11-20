@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import local_rag_service
@@ -36,11 +37,11 @@ class FakeRuntime:
         self.paid = []
         self.cached = set()
 
-    def __call__(self, project, question, check_only=False):
-        identity = hashlib.sha256(question.encode()).hexdigest()
+    def __call__(self, project, question, check_only=False, *, attempt_id=None):
+        identity = hashlib.sha256((question + (attempt_id or "")).encode()).hexdigest()
         if check_only:
-            return {"status": "completed" if question in self.cached else "check_only",
-                    "cached": question in self.cached, "run_identity": identity}
+            cached = attempt_id is None and question in self.cached
+            return {"status": "completed" if cached else "check_only", "cached": cached, "run_identity": identity}
         self.paid.append(question)
         self.started.set()
         self.release.wait(5)
@@ -110,21 +111,47 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.runtime.paid, [])
         self.assertEqual(list(self.project.rglob("*")), [])
 
-    def test_cache_hit_returns_200_without_paid_work(self):
-        self.runtime.cached.add("cached")
-        status, headers, body = self.request_full("POST", "/ask", {"question": "cached"})
-        self.assertEqual(status, 200)
-        self.assertEqual(set(body), KIT_KEYS)
-        self.assertEqual(body, {"answer": "초안", "citation": [], "source_url": "", "effective_date": ""})
-        self.assertEqual(headers["x-rag-status"], "completed")
-        identity = hashlib.sha256(b"cached").hexdigest()
-        self.assertEqual(headers["x-rag-job-id"], identity)
-        # The demo path keeps the detailed body for the same job.
-        status, headers, body = self.request_full("POST", "/ui/ask", {"question": "cached"})
-        self.assertEqual((status, body["status"], body["job_id"]), (200, "completed", identity))
-        self.assertFalse(body["result"]["answer_allowed"])
-        self.assertNotIn("x-rag-status", headers)
-        self.assertEqual(self.runtime.paid, [])
+    def test_repeated_question_starts_new_job_and_old_job_remains_pollable(self):
+        self.runtime.release.set()
+        self.runtime.cached.add("cached")  # A receipt from the previous, unscoped runtime.
+        _, headers, first = self.request_full("POST", "/ask", {"question": "cached"})
+        first_id = headers["x-rag-job-id"]
+        status, view = self.request("POST", "/ui/ask", {"question": "cached"})
+        self.assertEqual((status, view["status"]), (200, "completed"))
+        self.assertNotEqual(view["job_id"], first_id)
+        self.assertEqual(kit_view(self.server.jobs.get(first_id)), first)
+        self.assertEqual(self.runtime.paid, ["cached", "cached"])
+        reopened = Jobs(self.project, runtime=self.runtime, publicizer=publicizer, health_provider=health)
+        try:
+            self.assertEqual(kit_view(reopened.get(first_id)), first)
+            third_id = reopened.submit("cached")["job_id"]
+            self.assertNotIn(third_id, {first_id, view["job_id"]})
+            self.assertEqual(reopened.wait(third_id, 2)["status"], "completed")
+            self.assertEqual(self.runtime.paid, ["cached"] * 3)
+        finally:
+            reopened.close()
+
+    def test_slow_preflight_allows_polling_another_completed_job(self):
+        self.runtime.release.set()
+        jobs = self.server.jobs
+        ready_id = jobs.submit("ready")["job_id"]
+        self.assertEqual(jobs.wait(ready_id, 2)["status"], "completed")
+        entered, resume = threading.Event(), threading.Event()
+        preflight = jobs._cached
+
+        def slow_preflight(question, attempt_id):
+            entered.set()
+            resume.wait(5)
+            return preflight(question, attempt_id)
+
+        with patch.object(jobs, "_cached", slow_preflight), ThreadPoolExecutor(2) as requests:
+            submission = requests.submit(jobs.submit, "another question")
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(requests.submit(jobs.get, ready_id).result(2)["status"], "completed")
+            finally:
+                resume.set()
+            self.assertEqual(jobs.wait(submission.result(2)["job_id"], 2)["status"], "completed")
 
     def test_deadline_202_and_singleflight_and_backpressure(self):
         started = time.monotonic()
@@ -225,7 +252,7 @@ class ServiceTests(unittest.TestCase):
     def test_worker_identity_drift_stops_before_paid_call_and_reports_500(self):
         checks, paid = [], []
         identity = hashlib.sha256(b"drift").hexdigest()
-        def drifting(project, question, check_only=False):
+        def drifting(project, question, check_only=False, *, attempt_id=None):
             if not check_only:
                 paid.append(question)
                 raise AssertionError("paid call must not run")
@@ -248,7 +275,7 @@ class ServiceTests(unittest.TestCase):
     def test_worker_uses_matching_cache_completed_while_queued(self):
         checks, paid = [], []
         identity = hashlib.sha256(b"cache-race").hexdigest()
-        def completed(project, question, check_only=False):
+        def completed(project, question, check_only=False, *, attempt_id=None):
             if not check_only:
                 paid.append(question)
                 raise AssertionError("matching cache must be reused")
@@ -274,8 +301,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(body, {"answer": "초안", "citation": ["서울특별시 예시 조례 제1조"],
                                 "source_url": "https://example.invalid/1", "effective_date": "2026-01-01"})
         self.assertEqual(headers["x-rag-status"], "completed")
-        self.assertEqual(headers["x-rag-job-id"], hashlib.sha256(b"sync").hexdigest())
-        # /ui/ask: the existing detailed sync_view body (same cached job).
+        first_id = headers["x-rag-job-id"]
+        # /ui/ask returns the detailed body for a new submission.
         status, headers, body = self.request_full("POST", "/ui/ask", {"question": "sync"})
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "completed")
@@ -286,11 +313,11 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(body["effective_date"], response["effective_date"][0])
         self.assertEqual(body["sources"], body["result"]["sources"])
         self.assertEqual(body["as_of_date"], "2026-10-01")
-        self.assertEqual(body["job_id"], hashlib.sha256(b"sync").hexdigest())
+        self.assertNotEqual(body["job_id"], first_id)
         self.assertFalse(body["answer_allowed"])
         self.assertFalse(body["final_answer_generated"])
         self.assertNotIn("x-rag-status", headers)
-        self.assertEqual(self.runtime.paid, ["sync"])
+        self.assertEqual(self.runtime.paid, ["sync", "sync"])
 
     def test_sync_deadline_keeps_job_running_and_retrievable(self):
         original = local_rag_service.SYNC_WAIT_SECONDS
@@ -300,7 +327,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertKitUnknown(headers, body, "deadline_exceeded")
             job_id = headers["x-rag-job-id"]
-            self.assertEqual(job_id, hashlib.sha256(b"slow").hexdigest())
+            self.assertRegex(job_id, r"^[0-9a-f]{64}$")
             # The demo path shows the same pending job with its poll URL.
             status, ui = self.request("POST", "/ui/ask", {"question": "slow"})
         finally:
@@ -327,7 +354,7 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("x-rag-job-id", headers)
 
     def test_async_completed_body_is_unchanged(self):
-        self.runtime.cached.add("cached")
+        self.runtime.release.set()
         for path in ("/ask", "/ui/ask"):
             status, headers, body = self.request_full("POST", path, {"question": "cached", "wait_seconds": 1})
             self.assertEqual(status, 200, path)
@@ -335,7 +362,50 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(body["status"], "completed")
             self.assertEqual(body["result"]["response"], {"answer": "초안"})
             self.assertNotIn("x-rag-status", headers)
-        self.assertEqual(self.runtime.paid, [])
+        self.assertEqual(self.runtime.paid, ["cached", "cached"])
+
+    def test_readability_through_grader_ui_and_poll_preserves_saved_answer(self):
+        record = full_publicizer({}, None)
+        original = "주차요금의 100분의 50을 감면할 수 있습니다."
+        expected = "주차요금의 50%를 감면할 수 있습니다."
+        record["response"]["answer"] = original
+        self.server.jobs.publicizer = lambda audit, project: record
+        self.runtime.release.set()
+        status, headers, response = self.request_full("POST", "/ask", {"question": "할인"})
+        self.assertEqual((status, response["answer"]), (200, expected))
+        self.assertEqual(response["citation"], record["response"]["citation"])
+        identity = headers["x-rag-job-id"]
+        status, view = self.request("POST", "/ui/ask", {"question": "할인"})
+        self.assertEqual((status, view["answer"], view["result"]["response"]["answer"]), (200, expected, expected))
+        status, view = self.request("GET", "/jobs/" + identity)
+        self.assertEqual((status, view["result"]["response"]["answer"]), (200, expected))
+        self.assertEqual(self.server.jobs.records[identity]["result"]["response"]["answer"], original)
+        self.assertEqual(self.runtime.paid, ["할인", "할인"])
+
+    def test_confirmed_unknown_has_an_inquiry_url_separate_from_legal_citations(self):
+        self.runtime.release.set()
+        url = "https://www.epeople.go.kr/"
+        for decision in ("insufficient_evidence", "out_of_scope"):
+            with self.subTest(decision=decision):
+                self.server.jobs.publicizer = lambda audit, project: {
+                    "status": decision, "response": {"answer": "확인 불가", "citation": []}}
+                status, headers, body = self.request_full("POST", "/ask", {"question": decision})
+                self.assertEqual((status, headers["x-rag-status"], body), (200, "completed", KIT_UNKNOWN))
+                self.assertEqual(headers["link"], f'<{url}>; rel="help"')
+                _, job = self.request("GET", "/jobs/" + headers["x-rag-job-id"])
+                _, ui = self.request("POST", "/ui/ask", {"question": decision})
+                for view in (job, ui):
+                    self.assertEqual(view["result"]["inquiry_url"], url)
+                    self.assertEqual(view["result"]["response"], {"answer": "확인 불가", "citation": []})
+        for result, expected_status in ((full_publicizer({}, None), "completed"),
+                                        ({"status": "code_check_failed"}, "processing_error"),
+                                        ({"status": "processing_error"}, "processing_error")):
+            self.server.jobs.publicizer = lambda audit, project: result
+            _, headers, _ = self.request_full("POST", "/ask", {"question": "다른 결과"})
+            self.assertEqual(headers["x-rag-status"], expected_status)
+            self.assertNotIn("link", headers)
+            _, job = self.request("GET", "/jobs/" + headers["x-rag-job-id"])
+            self.assertNotIn("inquiry_url", job["result"])
 
     def test_kit_view_shape_for_every_job_state(self):
         result = full_publicizer({}, None)
@@ -689,31 +759,32 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["status"], "ok")
         status, _, body = self.raw_get("/jobs/" + identity)
         self.assertEqual((status, json.loads(body)["status"]), (404, "job_not_found"))
-        self.runtime.cached.add("cached")
-        status, _ = self.request("POST", "/ui/ask", {"question": "cached"})
+        self.runtime.release.set()
+        status, submitted = self.request("POST", "/ui/ask", {"question": "cached"})
+        identity = submitted["job_id"]
         self.assertEqual(status, 200)
         status, _, body = self.raw_get("/jobs/" + identity)
         self.assertEqual((status, json.loads(body)["job_id"]), (200, identity))
         status, _, body = self.raw_get("/health/x.json")
         self.assertEqual((status, body), (200, b"{}"))
-        self.assertEqual(self.runtime.paid, [])
+        self.assertEqual(self.runtime.paid, ["cached"])
 
     def test_unknown_request_fields_are_ignored(self):
-        self.runtime.cached.add("cached")
+        self.runtime.release.set()
         status, headers, body = self.request_full("POST", "/ask", {"question": "cached", "db": "evil", "top_k": 99})
         self.assertEqual((status, headers["x-rag-status"], set(body)), (200, "completed", KIT_KEYS))
         status, body = self.request("POST", "/ui/ask", {"question": "cached", "db": "evil", "top_k": 99})
         self.assertEqual((status, body["status"]), (200, "completed"))
-        status, body = self.request("POST", "/ask", {"question": "cached", "extra": {"x": 1}, "wait_seconds": 0})
+        status, body = self.request("POST", "/ask", {"question": "cached", "extra": {"x": 1}, "wait_seconds": 1})
         self.assertEqual((status, body["status"]), (200, "completed"))
-        self.assertEqual(self.runtime.paid, [])
+        self.assertEqual(self.runtime.paid, ["cached"] * 3)
 
     # ---- 1. failed / interrupted jobs are requeued once on resubmission
 
     def test_resubmitted_failed_job_is_requeued_once(self):
-        identity = hashlib.sha256(b"flaky").hexdigest()
         paid = []
-        def flaky(project, question, check_only=False):
+        def flaky(project, question, check_only=False, *, attempt_id=None):
+            identity = hashlib.sha256((question + attempt_id).encode()).hexdigest()
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             paid.append(question)
@@ -723,7 +794,7 @@ class ServiceTests(unittest.TestCase):
         jobs = Jobs(self.project, runtime=flaky, publicizer=publicizer, health_provider=health,
                     readiness_provider=ready)
         try:
-            jobs.submit("flaky")
+            identity = jobs.submit("flaky")["job_id"]
             self.assertTrue(jobs.events[identity].wait(2))
             self.assertEqual(jobs.get(identity)["status"], "failed")
             first_event = jobs.events[identity]
@@ -736,16 +807,16 @@ class ServiceTests(unittest.TestCase):
             saved = json.loads((self.project / JOB_AREA / (identity + ".json")).read_bytes())
             self.assertEqual((saved["status"], saved["requeues"]), ("completed", 1))
             self.assertEqual(paid, ["flaky", "flaky"])
-            # A completed job stays completed (no further paid call).
-            self.assertEqual(jobs.submit("flaky")["status"], "completed")
-            self.assertEqual(len(paid), 2)
+            next_job = jobs.submit("flaky")
+            self.assertNotEqual(next_job["job_id"], identity)
+            self.assertEqual(jobs.get(identity)["status"], "completed")
         finally:
             jobs.close()
 
     def test_requeue_limit_is_one_and_survives_restart(self):
         identity = hashlib.sha256(b"broken").hexdigest()
         paid = []
-        def broken(project, question, check_only=False):
+        def broken(project, question, check_only=False, *, attempt_id=None):
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             paid.append(question)
@@ -774,9 +845,11 @@ class ServiceTests(unittest.TestCase):
             restarted.close()
 
     def test_interrupted_job_is_requeued_on_resubmission_not_on_restart(self):
-        identity = hashlib.sha256(b"restart").hexdigest()
+        attempt_id = "interrupted-attempt"
+        identity = hashlib.sha256(("restart" + attempt_id).encode()).hexdigest()
         atomic_json(self.project / JOB_AREA / (identity + ".json"), {
-            "job_id": identity, "run_identity": identity, "question": "restart", "status": "running"})
+            "job_id": identity, "run_identity": identity, "question": "restart", "status": "running",
+            "attempt_id": attempt_id, "created_ns": 10})
         self.runtime.release.set()
         restarted = Jobs(self.project, runtime=self.runtime, publicizer=publicizer,
                          health_provider=health, queue_size=1, readiness_provider=ready)
@@ -792,6 +865,7 @@ class ServiceTests(unittest.TestCase):
         # A requeued job interrupted again stays interrupted: the limit is reached.
         atomic_json(self.project / JOB_AREA / (identity + ".json"), {
             "job_id": identity, "run_identity": identity, "question": "restart", "status": "running",
+            "attempt_id": attempt_id, "created_ns": 10,
             "requeues": 1})
         again = Jobs(self.project, runtime=self.runtime, publicizer=publicizer,
                      health_provider=health, queue_size=1, readiness_provider=ready)
@@ -802,9 +876,11 @@ class ServiceTests(unittest.TestCase):
             again.close()
 
     def test_requeue_with_full_queue_returns_429_and_keeps_failed_record(self):
-        identity = hashlib.sha256(b"one").hexdigest()
+        attempt_id = "queued-attempt"
+        identity = hashlib.sha256(("one" + attempt_id).encode()).hexdigest()
+        self.server.jobs.latest["one"] = identity
         self.server.jobs.records[identity] = {"job_id": identity, "run_identity": identity, "question": "one",
-                                              "status": "failed", "cached": False,
+                                              "status": "failed", "cached": False, "attempt_id": attempt_id, "created_ns": 1,
                                               "result": {"status": "processing_error"}}
         status, _ = self.request("POST", "/ask", {"question": "busy-1", "wait_seconds": 0})
         self.assertEqual(status, 202)
@@ -827,7 +903,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.server.jobs.records[identity]["status"], "failed")
 
     def test_server_side_rejections_are_200_for_sync_and_keep_codes_for_async(self):
-        def preflight_fails(project, question, check_only=False):
+        def preflight_fails(project, question, check_only=False, *, attempt_id=None):
             return {"status": "processing_error"}
         def submit_crashes(question):
             raise OSError("private-path")
@@ -860,26 +936,20 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(self.runtime.paid, [])
 
-    def test_server_value_error_after_validation_is_200_on_grader_ask_only(self):
-        def bad_public(audit, project):
-            return "not-a-dict"
-        self.runtime.cached.add("cached")
-        self.server.jobs.publicizer = bad_public
-        # Grader mode: a server-side ValueError (invalid_public_result) is a processing error, HTTP 200.
-        status, headers, body = self.request_full("POST", "/ask", {"question": "cached"})
+    def test_invalid_public_result_is_operational_failure_on_each_endpoint(self):
+        self.runtime.release.set()
+        self.server.jobs.publicizer = lambda audit, project: "not-a-dict"
+        status, headers, body = self.request_full("POST", "/ask", {"question": "q"})
         self.assertEqual(status, 200)
-        self.assertKitUnknown(headers, body, "processing_error")
-        # Asynchronous and demo callers keep the existing (400) answer for the same failure.
-        status, body = self.request("POST", "/ask", {"question": "cached", "wait_seconds": 0})
-        self.assertEqual((status, body["status"]), (400, "invalid_json_request"))
-        status, body = self.request("POST", "/ui/ask", {"question": "cached"})
-        self.assertEqual((status, body["status"]), (400, "invalid_json_request"))
-        self.assertEqual(self.runtime.paid, [])
+        self.assertKitUnknown(headers, body, "failed")
+        status, body = self.request("POST", "/ui/ask", {"question": "q"})
+        self.assertEqual((status, body["status"]), (200, "failed"))
+        self.assertNotIn("epeople.go.kr", json.dumps(body))
 
     def test_grader_ask_failed_and_interrupted_jobs_are_kit_unknown(self):
         identity = hashlib.sha256(b"broken").hexdigest()
         paid = []
-        def broken(project, question, check_only=False):
+        def broken(project, question, check_only=False, *, attempt_id=None):
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             paid.append(question)
@@ -896,9 +966,12 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((status, body["status"], body["result"]["status"]), (200, "failed", "processing_error"))
         self.assertEqual(len(paid), 2)
         # An interrupted job whose requeue is used up stays interrupted.
-        interrupted = hashlib.sha256(b"stopped").hexdigest()
+        attempt_id = "interrupted-attempt"
+        interrupted = hashlib.sha256(("stopped" + attempt_id).encode()).hexdigest()
+        self.server.jobs.latest["stopped"] = interrupted
         self.server.jobs.records[interrupted] = {"job_id": interrupted, "run_identity": interrupted,
-                                                 "question": "stopped", "status": "interrupted", "requeues": 1}
+                                                 "question": "stopped", "status": "interrupted", "requeues": 1,
+                                                 "attempt_id": attempt_id, "created_ns": 1}
         self.server.jobs.runtime = self.runtime
         status, headers, body = self.request_full("POST", "/ask", {"question": "stopped"})
         self.assertEqual(status, 200)
@@ -931,9 +1004,9 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(body))
         self.assertEqual(self.runtime.paid, [])
 
-    def test_not_ready_does_not_block_cached_answers(self):
+    def test_health_diagnostics_do_not_disable_the_runtime(self):
         self.server.jobs.readiness_provider = lambda: ["missing_upstage_api_key"]
-        self.runtime.cached.add("cached")
+        self.runtime.release.set()
         status, headers, body = self.request_full("POST", "/ask", {"question": "cached"})
         self.assertEqual((status, headers["x-rag-status"], body["answer"]), (200, "completed", "초안"))
 
@@ -1007,14 +1080,14 @@ class ServiceTests(unittest.TestCase):
     def test_ten_concurrent_sync_requests_fill_queue_and_all_answer_before_deadline(self):
         runtime = FakeRuntime()
         active, peak, lock = [0], [0], threading.Lock()
-        def tracked(project, question, check_only=False):
+        def tracked(project, question, check_only=False, *, attempt_id=None):
             if check_only:
-                return runtime(project, question, check_only=True)
+                return runtime(project, question, check_only=True, attempt_id=attempt_id)
             with lock:
                 active[0] += 1
                 peak[0] = max(peak[0], active[0])
             try:
-                return runtime(project, question)
+                return runtime(project, question, attempt_id=attempt_id)
             finally:
                 with lock:
                     active[0] -= 1
@@ -1053,8 +1126,8 @@ class ServiceTests(unittest.TestCase):
     def test_ten_concurrent_requests_complete_in_order_with_one_worker(self):
         delay = 0.05
         active, peak, paid, lock = [0], [0], [], threading.Lock()
-        def quick(project, question, check_only=False):
-            identity = hashlib.sha256(question.encode()).hexdigest()
+        def quick(project, question, check_only=False, *, attempt_id=None):
+            identity = hashlib.sha256((question + (attempt_id or "")).encode()).hexdigest()
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             with lock:
@@ -1067,13 +1140,13 @@ class ServiceTests(unittest.TestCase):
             return {"status": "completed", "run_identity": identity}
         server, stop = self._server(quick, queue_size=8)
         try:
-            # Same question ten times (grader retries): one paid run, ten answers.
+            # Overlapping submissions share a job; a request arriving after completion starts another.
             results = self._concurrent(server.server_port, [{"question": "same"}] * 10)
             self.assertTrue(all(results), results)
             self.assertEqual({(status, headers["x-rag-status"]) for status, _, _, headers in results},
                              {(200, "completed")})
-            self.assertEqual(len({headers["x-rag-job-id"] for _, _, _, headers in results}), 1)
-            self.assertEqual(paid, ["same"])
+            same_runs = len({headers["x-rag-job-id"] for _, _, _, headers in results})
+            self.assertEqual(paid, ["same"] * same_runs)
             # Ten distinct questions in two waves of five: all answered, never two runs at once.
             for wave in (range(0, 5), range(5, 10)):
                 results = self._concurrent(server.server_port, [{"question": "d%d" % i} for i in wave])
@@ -1084,7 +1157,7 @@ class ServiceTests(unittest.TestCase):
                     self.assertEqual(set(body), KIT_KEYS)
                     self.assertEqual(body["answer"], "초안")
                     self.assertLess(elapsed, 5 * delay + 8.0)
-            self.assertEqual(sorted(paid), sorted(["same"] + ["d%d" % i for i in range(10)]))
+            self.assertEqual(sorted(paid), sorted(["same"] * same_runs + ["d%d" % i for i in range(10)]))
             self.assertEqual(peak[0], 1)
         finally:
             stop()
@@ -1095,8 +1168,8 @@ class ServiceTests(unittest.TestCase):
     def _tracked_runtime(delay=0.0, release=None):
         """Fake paid runtime recording concurrency; `release` blocks each paid run until set."""
         state = {"active": 0, "peak": 0, "paid": [], "lock": threading.Lock()}
-        def runtime(project, question, check_only=False):
-            identity = hashlib.sha256(question.encode()).hexdigest()
+        def runtime(project, question, check_only=False, *, attempt_id=None):
+            identity = hashlib.sha256((question + (attempt_id or "")).encode()).hexdigest()
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             with state["lock"]:
@@ -1143,7 +1216,7 @@ class ServiceTests(unittest.TestCase):
         import ask_local_rag
         from local_rag_client import SendGate
         calls = []
-        def fake_run_question(project, question, check_only=False, client_options=None):
+        def fake_run_question(project, question, check_only=False, client_options=None, *, attempt_id=None):
             calls.append((question, check_only, client_options))
             return {"status": "check_only", "run_identity": "0" * 64}
         with patch.object(ask_local_rag, "run_question", fake_run_question):
@@ -1244,7 +1317,7 @@ class ServiceTests(unittest.TestCase):
         """run_question returns processing_error (e.g. RateLimitedNoResend) without a run identity."""
         identity = hashlib.sha256(b"limited").hexdigest()
         paid = []
-        def limited(project, question, check_only=False):
+        def limited(project, question, check_only=False, *, attempt_id=None):
             if check_only:
                 return {"status": "check_only", "cached": False, "run_identity": identity}
             paid.append(question)

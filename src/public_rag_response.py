@@ -14,6 +14,10 @@ ORDINANCE_SCOPE_NOTICE = ('제공된 조례 문언에 한정한 설명입니다.
                          '개별 사안의 실제 요금·자격·적용 여부는 아직 확정되지 않았습니다.')
 CLARIFICATION_NOTICE = ('조례에서 확인되는 범위의 설명입니다. '
                         '개별 사안의 적용 여부는 추가 사실 확인이 필요합니다.')
+SOURCE_SCOPE_NOTICES = {
+    'partial_allowance': '구체적인 지급 조건은 해당 사업의 지급 기준을 확인해야 합니다.',
+    'delegated_fee': '정확한 금액은 해당 기준의 원문을 확인해야 합니다.',
+}
 MESSAGES = {
     'needs_clarification': '적용에 필요한 사실을 추가로 확인해야 합니다.',
     'external_material_required': '필요한 외부 자료가 아직 확인되지 않았습니다.',
@@ -26,7 +30,7 @@ MESSAGES = {
 }
 
 
-def scope_boundary_notice(missing_materials, missing_information):
+def scope_boundary_notice(missing_materials, missing_information, *, allowance=False, source_kind=None):
     """Code-owned processing state, never a substitute for ordinance evidence."""
     if (not isinstance(missing_materials, list) or not missing_materials or
             not all(isinstance(value, str) and value.strip() for value in missing_materials)):
@@ -34,7 +38,8 @@ def scope_boundary_notice(missing_materials, missing_information):
     if (not isinstance(missing_information, list) or
             not all(isinstance(value, str) and value.strip() for value in missing_information)):
         raise ValueError('invalid_scoped_missing_facts')
-    return {'provenance': 'processing_status', 'text': ORDINANCE_SCOPE_NOTICE,
+    notice = SOURCE_SCOPE_NOTICES.get('partial_allowance' if allowance else source_kind, ORDINANCE_SCOPE_NOTICE)
+    return {'provenance': 'processing_status', 'text': notice,
             'answer_scope': 'ordinance_only', 'external_material_status': '외부 자료 확인 필요',
             'fully_resolved': False, 'missing_materials': copy.deepcopy(missing_materials),
             'missing_information': copy.deepcopy(missing_information)}
@@ -152,6 +157,35 @@ def render_sources(citation_rows, catalog, owners=None):
     return sources
 
 
+def _confirmed_withheld_absence(result):
+    """Accept the typed NONE verdict only when the completed check receipt agrees."""
+    checks = result.get('code_checks')
+    if not isinstance(checks, dict):
+        return False
+    checks_ok = checks.get('status') == 'passed' and checks.get('issues') == []
+    adjustment = result.get('decision_adjustment')
+    verdict = result.get('provision_check')
+    if (not checks_ok or result.get('schema_version') != 'local-rag-single-generation-v1'
+            or result.get('draft_generated') is not True or result.get('decision') != 'insufficient_evidence'
+            or result.get('answer_allowed') is not False or result.get('final_answer_generated') is not False
+            or not isinstance(adjustment, dict) or set(adjustment) != {'from', 'to', 'reason'}
+            or adjustment['from'] not in ('supported', 'external_material_required', 'needs_clarification')
+            or adjustment['to'] != 'insufficient_evidence' or adjustment['reason'] != 'provision_check_no_provision'
+            or not isinstance(verdict, dict) or set(verdict) != {'asked_matter', 'provision_id', 'basis'}
+            or not isinstance(verdict['asked_matter'], str) or not verdict['asked_matter'].strip()
+            or verdict['provision_id'] != 'NONE' or verdict['basis'] != 'no_provision'):
+        return False
+    stages = result.get('audit')
+    if not isinstance(stages, list) or not stages or not all(isinstance(row, dict) for row in stages):
+        return False
+    receipt = stages[-1]
+    return (sum(row.get('stage') == 'provision_check' for row in stages) == 1
+            and receipt.get('stage') == 'provision_check' and receipt.get('parsed_response') == verdict
+            and isinstance(receipt.get('response'), dict)
+            and not any(key in receipt for key in ('error_type', 'validation_error', 'deadline',
+                                                   'prior_attempt', 'rate_limit', 'purpose')))
+
+
 def public_result(audit, project=None, catalog=None):
     """A verified draft is deliberately distinct from final answer approval.
 
@@ -245,14 +279,16 @@ def public_result(audit, project=None, catalog=None):
         if scoped:
             missing=result.get('missing_materials',[])
             facts=result.get('missing_information',[])
-            notice=scope_boundary_notice(missing,facts)
+            source_kind=result.get('evidence_selection', {}).get('source_first', {}).get('kind')
+            notice=scope_boundary_notice(missing,facts,source_kind=source_kind)
             if (result.get('scope_notice') != notice or result.get('fully_resolved') is not False
                     or result.get('answer_scope') != 'ordinance_only'):
                 raise ValueError('scope_notice_invariant_failed')
             # The verified model body contains legal propositions only. This
             # mandatory prefix comes from unresolved processing state, with no
             # invented amount, user-fact interpretation, or ordinance citation.
-            output['response']['answer']=notice['text']+'\n\n'+draft['answer']
+            output['response']['answer']=(draft['answer']+' '+notice['text'] if source_kind in SOURCE_SCOPE_NOTICES
+                                          else notice['text']+'\n\n'+draft['answer'])
             output.update(missing_materials=copy.deepcopy(missing),external_material_status='외부 자료 확인 필요',
                           fully_resolved=False,scope_notice=notice)
             if facts:output['missing_information']=copy.deepcopy(facts)
@@ -268,6 +304,11 @@ def public_result(audit, project=None, catalog=None):
             output.update(missing_information=copy.deepcopy(facts),clarification_required=True,
                           fully_resolved=False)
         return output
+    if draft_status == 'withheld_no_provision':
+        if audit.get('status') == 'completed' and _confirmed_withheld_absence(result):
+            return {**base, 'status': 'insufficient_evidence', 'message': MESSAGES['insufficient_evidence'],
+                    'response': {'answer': '확인 불가', 'citation': []}}
+        return {**base, 'status': 'code_check_failed', 'message': MESSAGES['code_check_failed']}
     if result.get('schema_version')=='local-rag-single-generation-v1' and result.get('draft_generated'):
         return {**base,'status':'code_check_failed','message':MESSAGES['code_check_failed']}
     if decision=='supported':
