@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify and deploy the Upstage bootcamp main branch
+After=network-online.target docker.service k3s.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/upstage-bootcamp/autodeploy/bin/deploy.sh
+TimeoutStartSec=20min
+TimeoutStopSec=5min
+UMask=0077
+Environment=GIT_TERMINAL_PROMPT=0
+Nice=10
+CPUWeight=20
+IOWeight=20
