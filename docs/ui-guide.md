@@ -47,7 +47,7 @@ Content-Type: application/json
 - `Content-Type`은 반드시 `application/json`이어야 합니다(아니면 415).
 - `question`은 비어 있지 않은 문자열입니다. 본문 전체는 32KB 이하여야 합니다.
 - 서버는 답이 나올 때까지 **최대 80초** 기다린 뒤 응답합니다. 서버 쪽 처리 결과(정상 답, 확인 불가, 시간 초과, 대기열 초과, 처리 오류)는 모두 **HTTP 200**으로 오고, 본문의 `status`로 구분합니다. 요청이 잘못된 경우에만 4xx가 옵니다.
-- 같은 질문이 이미 처리 중이면 새로 처리하지 않고 그 결과를 같이 받습니다.
+- 같은 질문이 처리 중이면 진행 중인 `job_id`를 공유합니다. 답변이 끝난 뒤 사용자가 같은 질문을 다시 보내면 `POST /ui/ask`로 제출하세요. 서버가 새 `job_id`를 발급하고 답을 새로 생성합니다. 이전 답변을 다시 열 때는 보관한 `job_id`로 `GET /jobs/<job_id>`를 호출합니다.
 
 #### (가) 정상 답
 
@@ -96,6 +96,7 @@ Content-Type: application/json
   "result": {
     "status": "out_of_scope",
     "message": "2026-10-01 기준 서울시 본청 6종 조례의 범위 밖입니다.",
+    "inquiry_url": "https://www.epeople.go.kr/",
     "response": {"answer": "확인 불가", "citation": []},
     "as_of_date": "2026-10-01",
     "answer_allowed": false,
@@ -105,6 +106,8 @@ Content-Type: application/json
   "final_answer_generated": false
 }
 ```
+
+시민 화면에서 **국민신문고에 문의하기** 링크를 연결할 때는 `result.inquiry_url` 값을 `href`로 사용하세요. 현재 기본 화면은 확인 불가 사유까지만 표시합니다. 서버는 근거 부족(`insufficient_evidence`)이나 범위 밖(`out_of_scope`)으로 판정해 `확인 불가`와 빈 인용을 반환할 때만 문의 주소를 보냅니다. 필드가 없으면 링크를 숨기세요. 답변이 다른 조례나 시행규칙을 가리키면서 조항을 인용했다면 해당 답과 근거 링크를 그대로 표시합니다.
 
 #### (다) 확인 불가 — 답을 확정하지 못함
 
@@ -131,7 +134,7 @@ Content-Type: application/json
 
 | `result.status` | 뜻 | 화면 안내 예 |
 | --- | --- | --- |
-| `out_of_scope`, `insufficient_evidence` | 조례 6종에서 근거를 찾지 못함 | "조례에서 근거 조항을 확인하지 못했습니다(확인 불가)." |
+| `out_of_scope`, `insufficient_evidence` | 조례 6종에서 근거를 찾지 못함 | 확인 불가 사유를 표시하고 `result.inquiry_url`이 있으면 문의 링크를 함께 표시 |
 | 그 밖의 값(`verification_failed`, `code_check_failed`, `needs_clarification`, `external_material_required` 등) | 근거 후보는 있었지만 답을 확정하지 못함 | "이 질문은 지금 답을 확정하지 못했습니다(확인 불가)." |
 
 `result.message`에는 서버가 만든 짧은 설명이 들어 있으니 안내 문장 뒤에 덧붙여 보여 줘도 됩니다.
@@ -189,7 +192,7 @@ Content-Type: application/json
 
 ### 3-2. `GET /jobs/<job_id>` — 늦어진 질문의 결과 확인
 
-`poll_url` 그대로 부르면 됩니다. 이 응답은 `/ui/ask`와 모양이 다릅니다. 답은 맨 위가 아니라 `result.response` 안에 있습니다.
+`poll_url` 그대로 부르면 됩니다. 조회는 모델을 다시 호출하지 않습니다. 완료된 답과 인용은 `result.response` 안에, 국민신문고 문의 주소가 있으면 `POST /ui/ask`와 같은 위치인 `result.inquiry_url`에 들어 있습니다.
 
 ```json
 {
@@ -243,7 +246,7 @@ Content-Type: application/json
  "answer_allowed": false, "final_answer_generated": false}
 ```
 
-`reasons`에는 `missing_upstage_api_key`(키 없음), `missing_dependency_requests`·`missing_dependency_dotenv`(패키지 미설치), `database_unavailable`(검색 자료 없음) 등이 들어갑니다. 키가 없어서 503이어도 전에 답한 적 있는 질문은 저장된 답으로 바로 나옵니다.
+`reasons`에는 `missing_upstage_api_key`(키 없음), `missing_dependency_requests`·`missing_dependency_dotenv`(패키지 미설치), `database_unavailable`(검색 자료 없음) 등이 들어갑니다. 이미 완료한 답은 해당 작업 번호로 조회할 수 있습니다. 같은 질문을 다시 제출해 새 답을 받으려면 서버가 새 요청을 처리할 수 있어야 합니다.
 
 ### 3-4. 필드 요약 (`POST /ui/ask` 응답)
 
@@ -261,9 +264,8 @@ Content-Type: application/json
 | `message` | `interrupted`일 때 | 짧은 설명 |
 | `result.status` | 처리가 끝난 경우 | 확인 불가의 종류 구분(3-1의 표) |
 | `result.message` | 처리가 끝난 경우 | 서버가 만든 짧은 설명 |
+| `result.inquiry_url` | 근거 부족·범위 밖으로 정상 완료한 확인 불가 | 국민신문고 문의 링크의 `href`. 조례 원문 링크는 `sources[].source_url` |
 | `answer_allowed`, `final_answer_generated` | 항상 | 늘 `false`. 화면에서는 쓰지 않아도 됩니다 |
-
-`result` 안에는 이 밖의 값도 있지만 화면에서는 `result.status`와 `result.message`만 쓰면 됩니다.
 
 ## 4. 화면에서 꼭 지킬 것
 
@@ -320,8 +322,8 @@ export default defineConfig({
 
 ## 7. 비용과 속도
 
-- 새 질문 하나는 Upstage API를 약 3번 부르고 보통 20초쯤 걸립니다(유료). 화면을 시험할 때 같은 질문을 반복해서 쓰면 비용이 들지 않습니다.
-- 한 번 답한 질문을 똑같이 다시 보내면 저장된 답이 바로 나옵니다. 글자 하나만 달라도 새 질문으로 처리됩니다.
+- 완료 후 다시 제출하면 초안 생성·조문 검사에 모델 호출 비용이 다시 들 수 있습니다. 같은 질문의 검색용 임베딩은 공유할 수 있으며, 호출 횟수와 응답 시간은 질문과 처리 경로에 따라 달라집니다.
+- 이미 받은 답을 다시 보여 주거나 진행 상황을 확인할 때는 해당 작업 번호로 조회하세요. 이 조회에는 모델 호출 비용이 들지 않습니다.
 - 예시 질문(공개 예시에서 고름):
   - 서울시 공영주차장 1급지 노상주차장 요금은 5분에 얼마인가요?
   - 서울시 금연구역에서 담배를 피우면 과태료가 얼마인가요?
