@@ -16,16 +16,18 @@ Exit code 1 if any question FAILs.
 """
 import argparse
 import json
+from pathlib import Path
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
 
-TIMEOUT_SECONDS = 90
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from submission_http import STATUS_HEADER, TIMEOUT_SECONDS, submission_request
+
 BAD_STATUSES = ("deadline_exceeded", "failed", "interrupted", "processing_error", "queue_full")
 KIT_FIELDS = ("answer", "citation", "source_url", "effective_date")
-STATUS_HEADER = "X-Rag-Status"
 
 
 def kit_source_format(value):
@@ -39,11 +41,7 @@ def kit_source_format(value):
 
 def check_question(url, question, *, timeout=TIMEOUT_SECONDS, host_header=None):
     """Send one grader-style request and return a verdict dict (never raises for HTTP/network errors)."""
-    body = json.dumps({"question": question}, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    if host_header:
-        headers["Host"] = host_header
-    request = urllib.request.Request(url.rstrip("/") + "/ask", data=body, headers=headers, method="POST")
+    request = submission_request(url, question, host_header=host_header)
     started = time.monotonic()
     verdict = {"question": question, "status_code": None, "status": None, "elapsed": None, "ok": False, "reason": ""}
     try:

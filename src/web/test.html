@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>대회 API 테스트 · 서울시 조례 Q&amp;A</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18283b;
+      --muted: #536578;
+      --line: #d6dfe7;
+      --blue: #185aa8;
+      --mono: ui-monospace, SFMono-Regular, Consolas, "Malgun Gothic", monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f6f8fa; color: var(--ink); font: 1rem/1.6 system-ui, "Malgun Gothic", sans-serif; }
+    main { max-width: 960px; margin: auto; padding: 28px 24px 64px; }
+    nav { margin-bottom: 25px; }
+    nav a { color: var(--blue); font-size: .9rem; text-underline-offset: 3px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); line-height: 1.25; letter-spacing: -.045em; }
+    h2 { font-size: 1.15rem; }
+    h3 { font-size: 1rem; }
+    header p, .hint { color: var(--muted); }
+    header p { margin: 8px 0 24px; }
+    .panel { background: white; border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+    .request-head, .result-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+    .endpoint { display: inline-flex; align-items: center; gap: 8px; font: 600 .86rem var(--mono); }
+    .endpoint b { background: #e5f3eb; color: #226345; padding: 3px 7px; border-radius: 4px; font-size: .73rem; }
+    .request-grid, .result-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 22px; align-items: start; margin-top: 17px; }
+    label, .code-label { display: block; font-size: .85rem; font-weight: 650; margin-bottom: 6px; }
+    textarea { width: 100%; min-height: 6.5rem; border: 1px solid #9eafbf; border-radius: 6px; padding: 10px 12px; resize: vertical; color: var(--ink); font: inherit; }
+    :focus-visible { outline: 3px solid #438ce1; outline-offset: 2px; }
+    button { margin: 10px 0 0; background: var(--blue); border: 0; border-radius: 6px; padding: 9px 18px; color: white; font: inherit; font-size: .95rem; font-weight: 650; cursor: pointer; }
+    button:hover:enabled { background: #104884; }
+    button:disabled { opacity: .65; cursor: wait; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .87rem/1.65 var(--mono); }
+    .code { background: #1b2b3b; color: #eef5ff; padding: 13px 15px; border-radius: 6px; }
+    .hint { font-size: .86rem; }
+    #result { margin-top: 18px; }
+    #verdict, .outcome { border-radius: 5px; padding: 3px 9px; font-size: .86rem; font-weight: 700; }
+    .report { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .outcome { margin-left: 8px; }
+    .detail-note:not(:empty) { margin-top: 8px; color: var(--muted); }
+    .pass { color: #205b41; background: #e6f4eb; }
+    .fail { color: #942a29; background: #feeeee; }
+    .info, .skip { color: #46576c; background: #eef2f6; }
+    ul { margin: 6px 0 0; padding: 0; list-style: none; }
+    li { border-top: 1px solid var(--line); padding: 8px 0; }
+    li strong { font-size: .9rem; }
+    li span { display: inline-block; margin-right: 8px; padding: 1px 6px; border-radius: 4px; font-size: .75rem; font-weight: 650; }
+    li small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+    .body-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .body-head label { color: var(--muted); font-weight: 500; margin: 0; cursor: pointer; }
+    [hidden] { display: none !important; }
+    @media (max-width: 640px) {
+      main { padding: 18px 14px 38px; }
+      .panel { padding: 16px; }
+      .request-grid, .result-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    }
+  </style>
+  <script type="module" src="/ask-test.mjs"></script>
+</head>
+<body>
+  <main>
+    <nav><a href="/">← 서울시 조례 묻고 답하기</a></nav>
+    <header>
+      <h1>대회 API 테스트</h1>
+      <p>같은 질문을 브라우저와 저장소의 Python 제출 검사기로 각각 보내고, 90초 안에 돌아온 JSON을 점검합니다.</p>
+    </header>
+    <form class="panel" id="test-form">
+      <div class="request-head">
+        <h2>질문 요청</h2>
+        <code class="endpoint"><b>POST</b> /ask</code>
+      </div>
+      <div class="request-grid">
+        <div>
+          <label for="question">질문</label>
+          <textarea id="question" required>서울시 청년 기본 조례에서 말하는 청년은 몇 살부터 몇 살까지인가요?</textarea>
+          <button type="submit" id="run-check">요청 보내고 검사</button>
+        </div>
+        <div>
+          <span class="code-label">보낼 JSON</span>
+          <pre class="code" id="request-body"></pre>
+        </div>
+      </div>
+      <noscript>검사를 실행하려면 브라우저에서 자바스크립트를 켜 주세요.</noscript>
+    </form>
+    <section class="panel" id="result" aria-labelledby="result-title" hidden>
+      <div class="result-head">
+        <h2 id="result-title" tabindex="-1">검사 결과</h2>
+        <span id="verdict" role="status"></span>
+      </div>
+      <div id="reports"></div>
+    </section>
+    <template id="report-template">
+      <details class="report" open>
+        <summary><span class="client-name"></span><span class="outcome info">응답 대기</span></summary>
+        <p class="detail-note"></p>
+        <div class="result-grid" hidden>
+          <div>
+            <h3>항목별 결과</h3>
+            <ul class="checks"></ul>
+          </div>
+          <div>
+            <div class="body-head">
+              <h3>응답 본문</h3>
+              <label class="raw-option" hidden><input type="checkbox"> 원문 보기</label>
+            </div>
+            <pre class="code response-body"></pre>
+          </div>
+        </div>
+      </details>
+    </template>
+  </main>
+</body>
+</html>

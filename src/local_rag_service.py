@@ -15,7 +15,8 @@ A body with `wait_seconds` (0..75) on either path is the asynchronous mode: HTTP
 202 reports a pending job, not a completed legal answer. Solar work may continue
 longer in its worker. `--host` other than loopback is for the grading
 environment only. GET / serves the citizen demo page (src/web/index.html), which
-uses POST /ui/ask. Other GET paths serve allow-listed static files under src/web/.
+uses POST /ui/ask. GET /test serves the submission checker, which calls POST /ask.
+Other GET paths serve allow-listed static files under src/web/.
 
 Timing: the grader allows 90 seconds per question. A synchronous request waits
 at most SYNC_WAIT_SECONDS (80) measured from the start of the request handler,
@@ -33,9 +34,12 @@ CLIENT_DEADLINE_SECONDS deadline for the HTTP 429 resend and one SendGate shared
 by all workers, so a 429 pauses new sends of every worker until its resend time.
 """
 import argparse
+import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import importlib
+import hmac
 import json
 import math
 import os
@@ -45,7 +49,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
 import uuid
+from urllib.parse import parse_qs, urlsplit
 
+from request_audit import RequestAudit
+from submission_http import SubmissionCheck
+
+SUBMISSION_CHECK_PATH = "/test/submission"
 JOB_AREA = "data/processed/local_rag/2026-10-01/service_jobs"
 JOB_ID = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BODY = 32768
@@ -485,23 +494,77 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
 
+    def _audit(self, operation, *args, **kwargs):
+        audit = getattr(self.server, "request_audit", None)
+        if audit is None:
+            return None
+        try:
+            return getattr(audit, operation)(*args, **kwargs)
+        except Exception:
+            # The answer API remains available if its separate audit store fails.
+            return None
+
     def _send(self, status, value, headers=None):
         body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        if status == 202:
-            self.send_header("Retry-After", "2")
-        for name, text in (headers or {}).items():
-            self.send_header(name, text)
-        self.end_headers()
         self.close_connection = True
+        write_outcome = "written"
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", WEB_SECURITY_POLICY)
+            self.send_header("Connection", "close")
+            if status == 202:
+                self.send_header("Retry-After", "2")
+            for name, text in (headers or {}).items():
+                self.send_header(name, text)
+            self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            write_outcome = "disconnected"
+        finally:
+            seq = getattr(self, "_audit_seq", None)
+            if seq is not None:
+                outcome = (headers or {}).get("X-Rag-Status") or value.get("status")
+                job_id = (headers or {}).get("X-Rag-Job-Id") or value.get("job_id")
+                self._audit("update", seq, http_status=status, response=value, rag_status=outcome,
+                            job_id=job_id, elapsed_ms=round((time.monotonic() - self._request_started) * 1000),
+                            write_outcome=write_outcome)
+                self._audit_seq = None
+
+    def _admin_requests(self):
+        password = self.server.request_log_password
+        if not password:
+            return self._send(503, {"error": "request_log_not_configured"})
+        authorization = self.headers.get_all("Authorization", [])
+        supplied = b""
+        try:
+            if len(authorization) == 1:
+                scheme, encoded = authorization[0].split(" ", 1)
+                if scheme.lower() == "basic":
+                    supplied = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
             pass
+        if not hmac.compare_digest(supplied, b"admin:" + password.encode("utf-8")):
+            return self._send(401, {"error": "authentication_required"},
+                              {"WWW-Authenticate": 'Basic realm="Request log", charset="UTF-8"'})
+        target = urlsplit(self.path)
+        if target.path in ("/admin/requests", "/admin/requests/", "/request-log.html"):
+            static = static_file("/request-log.html")
+            return self._send_file(*static) if static else self._error(404, "not_found")
+        query = parse_qs(target.query, keep_blank_values=True)
+        before = query.get("before", [None])[0]
+        if (set(query) - {"before"} or len(query.get("before", [])) > 1
+                or (before is not None and (not re.fullmatch(r"[1-9][0-9]{0,18}", before)
+                                            or int(before) > 9223372036854775807))):
+            return self._send(400, {"error": "invalid_cursor"})
+        page = self._audit("page", int(before) if before is not None else None)
+        if page is None:
+            return self._send(503, {"error": "request_log_unavailable"})
+        return self._send(200, page)
 
     def _send_page(self):
         try:
@@ -527,6 +590,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _error(self, status, code):
+        if self.path == SUBMISSION_CHECK_PATH and self.command == "POST":
+            return self._send(status, {"error": code, "elapsed_ms": 0})
         if self._kit:
             # Grader-mode /ask: the kit body only; the reason stays in the header.
             return self._send(status, kit_view(None), {"X-Rag-Status": code})
@@ -564,6 +629,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             return self._error(403, "local_origin_required")
         try:
+            if self.path.split("?", 1)[0] in ("/admin/requests", "/admin/requests/", "/admin/requests/data", "/request-log.html"):
+                return self._admin_requests()
             if self.path in WEB_PATHS:
                 return self._send_page()
             if self.path == "/health":
@@ -573,7 +640,8 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 job = self.server.jobs.get(match[1])
                 return self._send(self._job_status(job), job) if job else self._error(404, "job_not_found")
-            static = static_file(self.path)
+            static_path = "/test.html" if self.path in ("/test", "/test/") else self.path
+            static = static_file(static_path)
             if static is not None:
                 return self._send_file(*static)
             self._error(404, "not_found")
@@ -582,10 +650,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         started = time.monotonic()
+        self._request_started = started
+        self._audit_seq = None
+        if self.path == "/ask":
+            self._audit_seq = self._audit("begin", self.headers, self.client_address[0])
         self._kit = self.path == "/ask"
         if not self._local():
             return self._error(403, "local_origin_required")
-        if self.path not in ASK_PATHS:
+        if self.path not in ASK_PATHS and self.path != SUBMISSION_CHECK_PATH:
             return self._error(404, "not_found")
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get("Transfer-Encoding") is not None:
@@ -612,11 +684,23 @@ class Handler(BaseHTTPRequestHandler):
             # Unknown fields are ignored, as in the starter kit's request model.
             if not isinstance(request, dict):
                 return self._error(400, "invalid_request_fields")
+            if self._audit_seq is not None:
+                question_value = request.get("question")
+                question_value = question_value[:MAX_QUESTION] if isinstance(question_value, str) else None
+                projection = {"question": question_value}
+                wait_value = request.get("wait_seconds")
+                if type(wait_value) is int or (type(wait_value) is float and math.isfinite(wait_value)):
+                    projection["wait_seconds"] = wait_value
+                self._audit("update", self._audit_seq, question=question_value, request=projection)
             sync = "wait_seconds" not in request
             self._kit = self._kit and sync
             question, wait = request.get("question"), request.get("wait_seconds", 0)
             if not isinstance(question, str) or not question.strip() or len(question.encode("utf-8")) > MAX_QUESTION:
                 return self._error(400, "invalid_question")
+            if self.path == SUBMISSION_CHECK_PATH:
+                if set(request) != {"question"}:
+                    return self._error(400, "invalid_request_fields")
+                return self._send(*self.server.submission_check.run(question))
             if type(wait) not in (int, float) or not 0 <= wait <= ASYNC_WAIT_LIMIT or not math.isfinite(wait):
                 return self._error(400, "invalid_wait_seconds")
             if sync:
@@ -657,6 +741,8 @@ class Server(ThreadingHTTPServer):
         super().server_close()
         if hasattr(self, "jobs"):
             self.jobs.close()
+        if getattr(self, "request_audit", None) is not None:
+            self.request_audit.close()
 
 
 def create_server(project, port=8000, *, runtime=None, publicizer=None, health_provider=None,
@@ -670,7 +756,16 @@ def create_server(project, port=8000, *, runtime=None, publicizer=None, health_p
     jobs = Jobs(project, runtime=runtime, publicizer=publicizer, health_provider=health_provider, queue_size=queue_size,
                 readiness_provider=readiness_provider, workers=workers)
     try:
+        submission_check = SubmissionCheck(os.environ.get("SUBMISSION_CHECK_BASE_URL"))
         server = Server((host, port), Handler)
+        server.request_log_password = os.environ.get("REQUEST_LOG_PASSWORD", "")
+        try:
+            legacy = [{"job_id": record["job_id"], "question": record.get("question"),
+                       "status": record.get("status"), "response": kit_view(record)} for record in jobs.records.values()]
+            server.request_audit = RequestAudit(project, legacy, jobs.folder)
+        except Exception:
+            server.request_audit = None
+        server.submission_check = submission_check
         server.jobs, server.bound_host = jobs, host
         return server
     except Exception:

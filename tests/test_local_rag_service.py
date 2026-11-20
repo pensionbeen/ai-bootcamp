@@ -523,6 +523,36 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("x-rag-status", headers)
         self.assertEqual(self.runtime.paid, [])
 
+    def test_submission_checker_serves_static_page_without_submitting(self):
+        content = b"<!DOCTYPE html><title>submission checker</title>"
+        root = self.web_root({"test.html": content})
+        for path in ("/test", "/test/"):
+            status, headers, body = self.raw_get(path)
+            self.assertEqual((status, body), (200, content), path)
+            self.assertWebHeaders(headers, body, "text/html; charset=utf-8")
+        (root / "test.html").unlink()
+        self.assertNotFound("/test")
+        self.assertEqual(self.runtime.paid, [])
+
+    def test_submission_checker_forwards_only_question(self):
+        route = "/test/submission"
+        result = {"http_status": 403, "body": "error code: 1010", "content_type": "text/plain",
+                  "rag_status": None, "elapsed_ms": 25}
+        with patch.object(self.server.submission_check, "run", return_value=(200, result)) as outbound:
+            for kwargs, code in (({"value": {"question": "x", "url": "http://other.invalid"}}, 400),
+                                 ({"value": {"question": "x", "wait_seconds": 1}}, 400),
+                                 ({"value": {"question": " "}}, 400),
+                                 ({"value": {"question": "x"}, "headers": {"Origin": "https://other.invalid"}}, 403),
+                                 ({"body": b"x" * 32769}, 413),
+                                 ({"body": b"{}", "headers": {"Content-Type": "text/plain"}}, 415)):
+                status, body = self.request("POST", route, **kwargs)
+                self.assertEqual((status, set(body)), (code, {"error", "elapsed_ms"}))
+            outbound.assert_not_called()
+            status, body = self.request("POST", route, {"question": "서울시 조례?"})
+            self.assertEqual((status, body), (200, result))
+            outbound.assert_called_once_with("서울시 조례?")
+        self.assertEqual(self.runtime.paid, [])
+
     def test_demo_page_on_non_loopback_follows_tunnel_host_rules(self):
         self.server.bound_host = "0.0.0.0"
         try:
