@@ -12,7 +12,8 @@ import time
 
 from ask_local_rag import run_question, DEFAULT_DATABASE
 from public_rag_response import public_result
-from local_rag_answer import merge_duplicate_generated_citations
+from local_rag_answer import (_claim_positions, _normalize_claim_layout, _quoted_context_paragraph,
+                              merge_duplicate_generated_citations)
 from release_policy import RELEASABLE_CHECK_ISSUES, RELEASED_WITH_CHECK_ISSUES
 
 LEGACY_CONTRACT='legacy-verified'
@@ -555,12 +556,22 @@ def _citation_repair_additions(result,citations):
     if not isinstance(repairs,list) or not isinstance(claims,list):return None
     added={}
     for repair in repairs:
-        if not isinstance(repair,dict) or set(repair)!=CITATION_REPAIR_FIELDS:return None
+        if not isinstance(repair,dict):return None
+        context=repair.get('reason')=='attributed_full_context_paragraph'
+        if set(repair)!=(CITATION_REPAIR_FIELDS|{'context_id'} if context else CITATION_REPAIR_FIELDS):return None
         index,ids,original=repair['claim_index'],repair['added_citation_ids'],repair['original_citation_ids']
-        if (type(index) is not int or not 0<=index<len(claims) or repair['reason'] not in CITATION_REPAIR_REASONS
+        if (type(index) is not int or not 0<=index<len(claims) or not (context or repair['reason'] in CITATION_REPAIR_REASONS)
                 or not isinstance(original,list) or not isinstance(ids,list) or not ids or len(set(ids))!=len(ids)
                 or any(not isinstance(uid,str) or uid not in citations or citations[uid].get('context_only') for uid in ids)):
             return None
+        if context:
+            claim={**claims[index],'citation_ids':original}
+            own=[citations[uid] for uid in original]
+            mentions=[m for m in _claim_positions(claim,citations)
+                      if repair['claim_span']=={'start':m['start'],'end':m['end']} and m['reference_text']==repair['reference_text']]
+            match=(_quoted_context_paragraph(claim,mentions[0],own,result['context_source_catalog'])
+                   if len(mentions)==1 else None)
+            if not match or match[0]!=repair['context_id'] or len(ids)!=1 or match[1]!=citations[ids[0]]:return None
         added.setdefault(index,[]).append((original,ids))
     return added
 
@@ -620,6 +631,13 @@ def source_selection_errors(result):
         recorded=result.get('duplicate_citation_ids_merged')
         merge_changed=(merge_duplicate_generated_citations(raw)!=(recorded or [])
                        or ('duplicate_citation_ids_merged' in result and not recorded))
+        if 'claim_layout_changes' in result:
+            layout=[{'text':r['text'],'citation_ids':binding['citation_ids']}
+                    for r,binding in zip(raw['claims'],trace['claims'])]
+            changes=_normalize_claim_layout(layout,citations)
+            if not changes or changes!=result['claim_layout_changes']:return ['source_selection_text_changed']
+            for row,normalized in zip(raw['claims'],layout):
+                row['text']=normalized['text']
         for key in ('claims','calculations'):
             generated=result.get('generated_'+key,[]);raw_rows=raw.get(key);traced=trace.get(key)
             if not isinstance(raw_rows,list) or not isinstance(traced,list) or not len(raw_rows)==len(generated)==len(traced):

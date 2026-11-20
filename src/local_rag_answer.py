@@ -15,7 +15,7 @@ import re
 import time
 
 from local_rag_client import READ_TIMEOUT_SECONDS as CLIENT_READ_TIMEOUT_SECONDS
-from public_rag_response import scope_boundary_notice, _provision_label
+from public_rag_response import hours_and_funding_claims, operating_hours_evidence, scope_boundary_notice, _provision_label
 from rag_numeric_amounts import won_literals, without_won, normalize_expression, currency_dimension, displayed_equation_span, native_won_sum_difference
 from rag_numeric_amounts import scaled_quantities, expression_unit, declared_quantity
 # Re-exported under the same names (other modules and tests import them from here).
@@ -1964,6 +1964,27 @@ def _draft_presentation_issues(answer):
     return issues
 
 
+def _normalize_claim_layout(claims, known):
+    """Keep legal item numbers and interior text, working only on restored claims."""
+    changes = []
+    for index, claim in enumerate(claims):
+        raw = claim["text"]
+        text = raw.strip(" \t\r\n")
+        if raw != text:
+            changes.append({"claim_index": index, "reason": "outer_whitespace"})
+        marker = re.match(r"^([1-9]\d*)\.\s+", text)
+        if marker and len(claim["citation_ids"]) == 1:
+            row = known[claim["citation_ids"][0]]
+            if (row["kind"] == "body" and not row.get("context_only")
+                    and str(row["locator"].get("item")) == marker[1] and row["quote"].strip() == text):
+                # An ordinance item's label is part of its source. Spell it out
+                # so the existing guard still rejects invented list numbering.
+                text = "제" + marker[1] + "호 " + text[marker.end():]
+                changes.append({"claim_index": index, "reason": "verbatim_ordinance_item_number"})
+        claim["text"] = text
+    return changes
+
+
 def _validated_draft_text(draft):
     answer = draft["answer"].strip()
     require(bool(answer) and len(answer) <= 12000 and answer != "확인 불가", "invalid_draft_text")
@@ -2385,7 +2406,65 @@ def _position_label_spans(claim, known, citations):
     return spans
 
 
-def _attach_named_provisions(claims, citations):
+def _quotes_named_paragraph(text, mention, row):
+    """Match a complete legal sentence to its explicit attribution in the claim."""
+    before, after = text[:mention["start"]].rstrip(), text[mention["end"]:].strip()
+    name = row["ordin_name"]
+    if before.endswith("「" + name + "」"):
+        before = before[:-len(name)-2] + name
+    source = re.sub(r"^[①-⑳]\s*", "", row["quote"].strip())
+    if not re.fullmatch(r"[^.!?\n]+다\.", source) or len(source.split()) < 4:
+        return False
+    if before.endswith("(" + name) and after == ")":
+        sentences = re.split(r"(?<=\.)\s+", before.removesuffix("(" + name).strip())
+        if len(sentences) > 1:
+            # A quoted rule of discretion may follow a permissive summary.
+            # It cannot substantiate a preceding promise, denial or obligation.
+            if (len(sentences) != 2 or not source.endswith("수 있다.")
+                    or not re.search(r"수 있(?:다|습니다)\.$", sentences[0])
+                    or re.search(r"반드시|무조건|예외 없이|의무|아니|않|없|못", sentences[0])):
+                return False
+        statement = sentences[-1]
+    elif before == name:
+        if attributed := re.fullmatch(r"(?:은|는)\s+(.+다)고 규정하고 (?:있다|있습니다)\.", after):
+            statement = attributed[1] + "."
+        elif attributed := re.fullmatch(r"에 따르면,?\s+(.+\.)", after):
+            statement = attributed[1]
+        else:
+            return False
+    else:
+        return False
+    # Only sentence-final register and the first subject's topic/nominative
+    # particle may differ. Keep all numbers, verb modality and conditions.
+    def comparable(sentence):
+        sentence = re.sub(r"(있습니다|합니다|됩니다)\.$",
+                          lambda m: {"있습니다": "있다.", "합니다": "한다.", "됩니다": "된다."}[m[1]], sentence)
+        return re.sub(r"^([가-힣]+)(?:은|이)(?=\s)", r"\1은", sentence)
+    return comparable(source) == comparable(statement)
+
+
+def _quoted_context_paragraph(claim, mention, own, catalog):
+    if not mention["ordinance"] or not mention["paragraph"] or mention["item"] is not None:
+        return None
+    identity = ("parent_chunk_id", "ordin_seq", "source_url", "effective_date", "as_of_date")
+    owners = {tuple(row.get(k) for k in identity) for row in own}
+    matches = []
+    for handle, row in catalog.items():
+        if (str(row["ordin_seq"]) != mention["ordinance"] or _named_article(row) != (mention["article"], mention["branch"])
+                or tuple(row.get(k) for k in identity) not in owners):
+            continue
+        for segment in row["source_segments"]:
+            if (segment.get("kind") != "provision" or str(segment.get("paragraph")) != str(mention["paragraph"])
+                    or _ITEM_LINE.search(segment["text"])):
+                continue
+            child, = _selected_context_children(row, {"paragraph": str(mention["paragraph"]), "item": ""})
+            matches.append((handle, child))
+    if len(matches) == 1 and _quotes_named_paragraph(claim["text"], mention, matches[0][1]):
+        return matches[0]
+    return None
+
+
+def _attach_named_provisions(claims, citations, context_catalog=None):
     """Cite the one unit a claim names but does not cite, when the catalog resolves it uniquely.
 
     Only claims with citations of their own are completed, and never a claim the
@@ -2399,6 +2478,7 @@ def _attach_named_provisions(claims, citations):
     citation_repairs record with the model's original citations.
     """
     known = {row["unit_id"]: row for row in citations}
+    direct = list(citations)  # A child recovered for one claim needs its own proof on another.
     repairs = []
     for index, claim in enumerate(claims):
         original = list(claim["citation_ids"])
@@ -2407,27 +2487,80 @@ def _attach_named_provisions(claims, citations):
         own = [known[uid] for uid in original if uid in known]
         guarded = {mention["start"] for mention in _unmatched_attributions(claim, known)}
         planned, blocked = [], False
+        context_matches = {}
         for mention in _claim_positions(claim, known):
-            cited = own + [known[uid] for _, ids in planned for uid in ids]
+            cited = own + [row for _, row in planned]
             if any(_named_covered(mention, row) for row in cited):
                 continue
             target = _mention_ordinance(mention, own)
             matching = [] if target is None else [
-                row["unit_id"] for row in citations
+                row for row in direct
                 if not row.get("context_only") and str(row.get("ordin_seq") or "") == target
                 and _named_covered({**mention, "ordinance": target}, row)]
             if len(matching) == 1:
-                planned.append((mention, matching))
+                planned.append((mention, matching[0]))
+            elif not matching and context_catalog and (match := _quoted_context_paragraph(claim, mention, own, context_catalog)):
+                handle, child = match
+                context_matches[child["unit_id"]] = handle
+                planned.append((mention, child))
             elif mention["start"] in guarded:
                 blocked = True
         if blocked:
             continue
-        for mention, matching in planned:
-            claim["citation_ids"].append(matching[0])
+        for mention, row in planned:
+            uid = row["unit_id"]
+            if uid not in known:
+                known[uid] = row
+                citations.append(row)
+            claim["citation_ids"].append(uid)
             repairs.append({"claim_index": index, "reference_text": mention["reference_text"],
                             "claim_span": {"start": mention["start"], "end": mention["end"]},
-                            "added_citation_ids": matching, "original_citation_ids": original,
-                            "reason": "attributed_provision_in_catalog"})
+                            "added_citation_ids": [uid], "original_citation_ids": original,
+                            **({"reason": "attributed_full_context_paragraph", "context_id": context_matches[uid]}
+                               if uid in context_matches else {"reason": "attributed_provision_in_catalog"})})
+    return repairs
+
+
+def _attach_quoted_sibling(claims, citations):
+    """Restore an otherwise unattributed, verbatim operative sentence from the same article."""
+    known = {row["unit_id"]: row for row in citations}
+    repairs = []
+    for index, claim in enumerate(claims):
+        own = [known[uid] for uid in claim["citation_ids"]]
+        if not own or any(row["kind"] != "body" for row in own):
+            continue
+        def article(row):
+            return (row.get("ordin_seq"), row.get("source_url"), row.get("effective_date"),
+                    row["locator"].get("article"))
+        scope = article(own[0])
+        if not all(scope) or any(article(row) != scope for row in own):
+            continue
+        sentences = list(re.finditer(r"(?:^|(?<=\.))\s*([^.!?\n]+다)\.", claim["text"]))
+        if len(sentences) < 2:
+            continue
+        for hit in sentences:
+            text = hit[1].strip()
+            if len(text) < 12 or len(text.split()) < 4 or any(text in row["quote"] for row in own):
+                continue
+            matches = []
+            for row in citations:
+                if (row["kind"] != "body" or row.get("context_only") or article(row) != scope
+                        or not row["locator"].get("paragraph") or row["locator"].get("item")
+                        or row["unit_id"].endswith("::intro")):
+                    continue
+                # A tail after a condition, an exception or a quotation cannot stand alone.
+                quote = row["quote"].strip()
+                if re.search(r"[「」‘’“”]|다만|제외|경우|때에는|한하여|한해|에 한정|(?:으)?면[, ]", quote):
+                    continue
+                if re.search(r"(?:^[①-⑳]?\s*|[.]\s+|(?:하고|하며),\s+)" + re.escape(text) + r"\.(?=\s|$)", quote):
+                    matches.append(row)
+            if len(matches) == 1:
+                row = matches[0]
+                claim["citation_ids"].append(row["unit_id"])
+                own.append(row)
+                repairs.append({"claim_index": index, "reference_text": text,
+                                "claim_span": {"start": hit.start(1), "end": hit.end(1)},
+                                "added_citation_ids": [row["unit_id"]], "reason": "verbatim_sibling_provision"})
     return repairs
 
 
@@ -3089,6 +3222,39 @@ def _confirmed_retrieved_absence(review, units, question, ordinance_names):
     return not any(word in unit["quote"] or word in unit["locator"] for word in anchors for unit in units)
 
 
+def _review_absence(output, question, data, originals, client, started):
+    """A missing document or an uncited draft cannot by itself establish absence."""
+    if data["local_reference"].get("unresolved") or len(output["audit"]) != 1:
+        return False
+    units = _uncited_review_units(originals, data["condition_candidates"])
+    if not units:
+        return False
+    # A reference can carry ordinance text outside the selected originals. The
+    # reviewer must see it too before declaring every candidate unrelated.
+    for task in data["external_tasks"].values():
+        quotes = task.get("source_quotes")
+        if not quotes:
+            return False
+        for source in quotes:
+            quote = source.get("quote_text", "").strip()
+            if not quote:
+                return False
+            if not any(quote in unit["quote"] for unit in units):
+                units.append({"id": "R%03d" % (len(units) + 1), "locator": "외부 규정을 참조한 조례 원문",
+                              "quote": quote})
+    review = _provision_check(client, question, [], [], {}, output["audit"],
+                              started + PROVISION_CHECK_DEADLINE_SECONDS, uncited_units=units)
+    absent = _confirmed_retrieved_absence(review, units, question, {r["ordin_name"] for r in originals})
+    output["uncited_draft_review"] = {"candidate_locators": {unit["id"]: unit["locator"] for unit in units},
+                                      "result": review, "confirmed_retrieved_absence": absent}
+    if absent:
+        output["decision_adjustment"] = {"from": output["decision"], "to": "insufficient_evidence",
+                                         "reason": "all_retrieved_candidates_unrelated"}
+        output.update(decision="insufficient_evidence", missing_materials=[], missing_information=[],
+                      reason="검색된 원문에서 질문이 묻는 사항의 근거를 확인하지 못했습니다.")
+    return absent
+
+
 def _provision_check(client, question, claims, citations, aliases_by_uid, audit, deadline, *, partial_allowance=False,
                      uncited_units=None):
     """One pre-publication call asking only whether a cited unit governs the asked matter.
@@ -3174,6 +3340,13 @@ def _provision_check(client, question, claims, citations, aliases_by_uid, audit,
                                        "transport_error_type": transport if isinstance(transport, str) else None}
             return None
         receipt.update(meta=copy.deepcopy(meta), response=copy.deepcopy(body))
+        # A read timeout measures inactivity, not total elapsed time. A late
+        # response remains auditable but cannot authorize a normal abstention.
+        received = time.monotonic()
+        if received >= deadline:
+            receipt.update(error_type="late_provision_check",
+                           deadline={**limits, "outcome": "timeout", "elapsed_seconds": round(received - sent, 3)})
+            return None
         try:
             result = _decode(body)
             _validate_shape(result, schema)
@@ -3292,12 +3465,39 @@ def assess_and_answer(question, retrieval, client, started=None):
         chosen = prepare_draft(question, citations, originals, crosswalk, getattr(client, "project", None),
                                expanded, units, data["primary_units"], data["condition_candidates"])
         if chosen is None:
-            generated = _call_once(client, GENERATION_PROMPT + GENERATION_EVIDENCE_PROMPT + GENERATION_PROFILE["prompt_extra"],
-                                   generation, _generation_schema(allowed, context_handles), output["audit"], started=started)
+            prompt = GENERATION_PROMPT + GENERATION_EVIDENCE_PROMPT + GENERATION_PROFILE["prompt_extra"]
+            proposals = hours_and_funding_claims(question, citations, originals, crosswalk)
+            if proposals:
+                extended = {**generation, "proposed_claims": proposals}
+                content = packed(extended)
+                if len(content) <= MAX_INPUT_CHARACTERS:
+                    generation = extended
+                    output["generation_input_sha256"] = hashlib.sha256(content.encode()).hexdigest()
+                    output["proposed_claims"] = copy.deepcopy(proposals)
+                    prompt += ("\nproposed_claims는 운영 시각과 비용 지원을 서로 다른 직접 근거로 설명한 문장들이다. "
+                               "질문 대상·관할·요구 및 원문과 맞으면 각 문장과 citation_ids를 그대로 claims에 사용한다. "
+                               "둘을 함께 묻는 경우 양쪽 결론을 남긴다. 운영에 관한 위임에서 경비 지원 기준을 추론하지 않는다. "
+                               "질문과 다른 시설·관할에는 제안 문장을 쓰지 않는다. 다른 질문·조건이 있으면 원문으로 별도로 답한다. "
+                               "답을 반복하거나 다른 제도·정의·연혁을 붙이지 않는다.")
+            generated = _call_once(client, prompt, generation, _generation_schema(allowed, context_handles),
+                                   output["audit"], started=started)
         else:
             generated, trace = chosen
             output["evidence_selection"].update(selection_contract="source_first_v1", source_first=trace)
             output["audit"].append({"stage": "source_selection", "kind": trace["kind"], "draft_model_called": False})
+        recovered_alias = None
+        if (chosen is None and generated["decision"] == "insufficient_evidence" and not any(generated[key] for key in
+                ("claims", "calculations", "missing_information", "missing_materials"))
+                and not data["local_reference"].get("unresolved") and not data["external_tasks"]):
+            proposal = operating_hours_evidence(question, citations, originals)
+            if proposal:
+                text, row = proposal
+                aliases = {uid: alias for alias, uid in crosswalk.items() if alias in allowed}
+                if row["unit_id"] in aliases:
+                    recovered_alias = aliases[row["unit_id"]]
+                    generated = {**generated, "decision": "supported",
+                                 "claims": [{"text": text, "citation_ids": [recovered_alias]}]}
+                    output["evidence_selection"]["delegation_after_empty_draft"] = row["unit_id"]
         # The receipt keeps the model's parsed_response unchanged; only exact
         # repeats in the working copy are merged and recorded here.
         duplicates = merge_duplicate_generated_citations(generated)
@@ -3320,18 +3520,28 @@ def assess_and_answer(question, retrieval, client, started=None):
         if decision not in ("supported", "external_material_required", "needs_clarification") or not generated["claims"]:
             require(not generated["claims"] and not generated["calculations"], "nonanswer_decision_has_claims")
             require(decision != "supported", "supported_without_claims")
+            if (decision == "external_material_required" and not generated["missing_information"]
+                    and _self_referential_missing_materials(generated["missing_materials"])):
+                _review_absence(output, question, data, originals, client, started)
             return output
         restored = restore_verification_citations(generated, crosswalk, allowed)
         output["source_selection_trace"] = _resolve_context_selections(generated, restored, context_catalog, citations)
         claims, calculations = restored["claims"], restored["calculations"]
+        by_id = {row["unit_id"]: row for row in citations}
+        layout_changes = (_normalize_claim_layout(claims, by_id) if decision == "supported"
+                          and all(claim["citation_ids"] for claim in claims) else [])
+        if layout_changes:
+            output["claim_layout_changes"] = layout_changes
         require(all(claim["text"].strip() and claim["text"] == claim["text"].strip() for claim in claims), "invalid_claim_text")
         answer = output["claim_joiner"].join(claim["text"] for claim in claims)
         require(_validated_draft_text({"answer": answer}) == answer, "generated_answer_text_changed")
-        by_id = {row["unit_id"]: row for row in citations}
         model_citation_ids = [list(claim["citation_ids"]) for claim in claims]
         # A provision a claim names and the catalog resolves to exactly one citable
         # unit is cited before any check (recorded as a citation repair).
-        output["citation_repairs"] = _attach_named_provisions(claims, citations)
+        quote_catalog = context_catalog if chosen is None and decision == "supported" and not calculations else None
+        output["citation_repairs"] = _attach_named_provisions(claims, citations, quote_catalog)
+        quoted_context = any(r["reason"] == "attributed_full_context_paragraph" for r in output["citation_repairs"])
+        by_id = {row["unit_id"]: row for row in citations}
         # Attribution repair only for a draft whose sole issue, checked with the model's own citations,
         # is the attribution guard; so an added citation can never clear another guard or the numeric
         # check. Applied before any selection is derived, so generated_claims, selected IDs,
@@ -3349,33 +3559,21 @@ def assess_and_answer(question, retrieval, client, started=None):
                 original_issues.append("needed_local_reference_unresolved")
         except (AnswerError, KeyError, TypeError, ValueError, OverflowError, SyntaxError, ArithmeticError):
             original_issues = None  # the unchanged final check below reports the same failure
-        if (chosen is None and decision == "supported" and len(claims) == 1 and not claims[0]["citation_ids"]
-                and not calculations and original_issues == ["claim_without_owned_citations"]
-                and _SOURCE_ABSENCE_CLAIM.search(answer) and len(output["audit"]) == 1
-                and not data["external_tasks"] and not data["local_reference"].get("unresolved")):
-            review_units = _uncited_review_units(originals, data["condition_candidates"])
-            if review_units:
-                review = _provision_check(client, question, [], [], {}, output["audit"],
-                                          started + PROVISION_CHECK_DEADLINE_SECONDS, uncited_units=review_units)
-                absent = _confirmed_retrieved_absence(review, review_units, question,
-                                                     {row["ordin_name"] for row in originals})
-                output["uncited_draft_review"] = {
-                    "candidate_locators": {unit["id"]: unit["locator"] for unit in review_units},
-                    "result": review, "confirmed_retrieved_absence": absent}
-                if absent:
-                    output["decision_adjustment"] = {"from": "supported", "to": "insufficient_evidence",
-                                                     "reason": "all_retrieved_candidates_unrelated"}
-                    output.update(decision="insufficient_evidence",
-                                  reason="검색된 원문에서 질문이 묻는 사항의 근거를 확인하지 못했습니다.")
-                    return output
-                # A relevant or delegated provision contradicts the uncited absence claim.
-                # An uncertain or failed review cannot establish absence either. In every
-                # such case the unchanged code check below withholds the unsupported text.
+        uncited_absence = (decision == "supported" and len(claims) == 1 and not claims[0]["citation_ids"]
+                           and original_issues == ["claim_without_owned_citations"]
+                           and _SOURCE_ABSENCE_CLAIM.search(answer) and not data["external_tasks"])
+        missing_local_text = (decision == "external_material_required" and not generated["missing_information"]
+                              and original_issues == ["self_referential_missing_material"])
+        if (chosen is None and not calculations and (uncited_absence or missing_local_text)
+                and _review_absence(output, question, data, originals, client, started)):
+            return output
         if original_issues is not None and list(dict.fromkeys(original_issues)) == [ATTRIBUTION_ISSUE]:
             output["citation_repairs"] += _repair_claim_attributions(claims, citations)
         # Same principle for the intro-only guard: only when it is the sole original issue.
         if original_issues is not None and list(dict.fromkeys(original_issues)) == [INTRO_ONLY_ISSUE]:
             output["citation_repairs"] += _repair_intro_only_item_citations(claims, citations)
+        if chosen is None and decision == "supported" and original_issues == [] and not calculations:
+            output["citation_repairs"] += _attach_quoted_sibling(claims, citations)
         # Every repair record states the model's own citations of that claim.
         for repair in output["citation_repairs"]:
             repair["original_citation_ids"] = list(model_citation_ids[repair["claim_index"]])
@@ -3414,7 +3612,7 @@ def assess_and_answer(question, retrieval, client, started=None):
                                                          source_kind=source_kind)
         releasable = (checks["status"] == "failed" and bool(checks["issues"])
                       and set(checks["issues"]) <= RELEASABLE_CHECK_ISSUES)
-        if checks["status"] == "passed" or releasable:
+        if checks["status"] == "passed" or (releasable and recovered_alias is None and not layout_changes):
             aliases_by_uid = {uid: alias for alias, uid in crosswalk.items()}
             check = _provision_check(client, question, claims, citations, aliases_by_uid, output["audit"],
                                      started + PROVISION_CHECK_DEADLINE_SECONDS,
@@ -3427,7 +3625,19 @@ def assess_and_answer(question, retrieval, client, started=None):
                 output["provision_check"]["reason"] = "prior_unknown_outcome"
             elif check is None and last.get("stage") == "provision_check" and "rate_limit" in last:
                 output["provision_check"]["reason"] = "rate_limited"
-            if check is not None and check["provision_id"] == "NONE" and check["basis"] == "no_provision":
+            if source_kind == "scoped_benefit" and (not check or check["basis"] != "states_content"
+                                                    or check["provision_id"] == "NONE"):
+                output.update(decision="processing_error", error_code="unconfirmed_benefit_provision",
+                              reason="선택한 감면 조항과 적용 조건을 최종 검사에서 확정하지 못했습니다.")
+            elif (layout_changes or quoted_context) and (not check or check["provision_id"] == "NONE"
+                                   or check["basis"] not in ("states_content", "delegates_elsewhere")):
+                output.update(decision="processing_error", reason="보완한 초안의 직접 근거를 확인하지 못했습니다.",
+                              error_code="unconfirmed_repaired_draft")
+            elif recovered_alias is not None and (not check or check["provision_id"] != recovered_alias
+                                                 or check["basis"] != "delegates_elsewhere"):
+                output.update(decision="processing_error", reason="위임 근거 검사 결과를 확정하지 못했습니다.",
+                              error_code="unconfirmed_delegation")
+            elif check is not None and check["provision_id"] == "NONE" and check["basis"] == "no_provision":
                 output["decision_adjustment"] = {"from": output["decision"], "to": "insufficient_evidence",
                                                  "reason": "provision_check_no_provision"}
                 output.update(decision="insufficient_evidence", draft_status="withheld_no_provision",

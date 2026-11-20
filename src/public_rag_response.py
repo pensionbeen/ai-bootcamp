@@ -186,6 +186,263 @@ def _confirmed_withheld_absence(result):
                                                    'prior_attempt', 'rate_limit', 'purpose')))
 
 
+_HOURS_QUESTION = re.compile(
+    r"(?:(?:서울특별시|서울시|서울)(?:(?:가|에서) (?:설치한|운영하는)|의)? )?"
+    r"(?P<facility>[가-힣]+?(?: [가-힣]+?){0,4}?)"
+    r"(?:(?:에|를|을) (?:(?:아침|오전|오후|낮|저녁)에 )?(?:가|방문하|이용하)려고 (?:합니다|해요)\. "
+    r"(?:(?:조례상|조례에서) )?|(?:에서는|에서|의|은|는|이|가)? )"
+    r"(?:(?:운영|개방|이용|개장|폐장|문(?:을)? (?:여는|닫는))\s*시간(?:은|이)? "
+    r"(?:어떻게 (?:되나요|되죠|됩니까|돼요)|정해져 있(?:나요|습니까)|언제(?:인가요|예요)|몇 시인가요)"
+    r"|몇 시(?:부터 몇 시까지|부터|까지|에) (?:(?:운영|개방)(?:하나요|합니까|되나요|해요|돼요)"
+    r"|문(?:을)? (?:여나요|닫나요|열어요|닫아요)))[?？.]?"
+)
+_OPERATING_RULE = re.compile(
+    r"(?:그 밖에 )?(?P<facilities>[가-힣 ]+(?:[ㆍ·][가-힣 ]+)*)의 "
+    r"(?:(?:[가-힣]{2,8})(?: 및 |, |ㆍ|·))*"
+    r"(?:운영|개방)(?:방법|시간| 기준| 방법|에 필요한 사항)(?: 등)?(?:은|을) "
+    r"(?:[가-힣 ]+에 준하여 )?[가-힣]+(?:이|가) 따로 정(?:한다|할 수 있다)\."
+)
+_SPECIFIC_HOURS = re.compile(r"\d+\s*시(?!설)|[가-힣]+\s*시부터|(?:개방|운영|이용)\s*시간|개장|폐장|휴관|휴무|"
+                             r"일출|일몰|오전|오후|야간|주간|연중무휴|상시 개방|항상 개방|"
+                             r"(?<!\d)\d{1,2}:\d{2}(?!\d)|휴일|주말|휴장|휴식일|입장\s*(?:시간|마감)")
+_ACTOR = r"(?:시장|구청장|군수|도지사)"
+_HOURS_TERM = r"(?:운영|개방|이용)(?: (?:시작|종료))?\s*(?:시간|시각)"
+_HOURS_AND_INSTALLATION = re.compile(
+    rf"(?:(?:서울시|서울특별시|서울) )?(?P<facility>[가-힣]+(?: [가-힣]+){{0,4}}?)(?:의|은|는) "
+    rf"(?:(?:{_HOURS_TERM}(?:과|와) 설치 주체|설치 주체(?:와| 및) {_HOURS_TERM})(?:를|을)? "
+    rf"(?:(?:함께|같이) )?(?:알려 ?주세요|궁금합니다)|"
+    rf"(?P<actor>{_ACTOR})(?:도|이|가) 설치할 수 (?:있나요|있습니까)\? "
+    rf"{_HOURS_TERM}(?:도|이|은)? 조례에 (?:나오나요|정해져 있나요))"
+    r"[?.？]?"
+)
+
+
+def _installation_rule(facility, actor, hours, originals):
+    """Keep the entire single operative sentence, including any stated purpose."""
+    pattern = re.compile(rf"(?P<actors>{_ACTOR}(?: 또는 {_ACTOR})*)[은는] "
+                         rf"(?:[^.?!\n]+?(?:위해|위하여) )?{re.escape(facility)}[을를] "
+                         r"설치(?:[·ㆍ ]운영)?(?:할 수 있다|하여야 한다|한다)\.")
+    matches = []
+    for row in originals:
+        if (row['kind'] != 'body' or row['unit_id'] != row['parent_chunk_id'] or row.get('context_only')
+                or row['locator'].get('article') != hours['locator'].get('article')
+                or any(row.get(k) != hours.get(k) for k in ('ordin_seq','source_url','effective_date'))):
+            continue
+        text = _paragraph_wording(row)
+        if match := pattern.fullmatch(text):
+            if not actor or actor in match['actors'].split(' 또는 '):
+                matches.append((text, row))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _delegated_hours(question, result, selected):
+    """Publish the ordinance-wide answer even when the individual facility's hours are unknown."""
+    check = result.get('provision_check') or {}
+    if (result.get('draft_status') != 'code_checked_draft'
+            or result.get('decision') not in ('supported', 'external_material_required', 'needs_clarification')
+            or result.get('generated_calculations') or result.get('error_code')):
+        return None
+    receipts = result.get('audit') or []
+    if (not isinstance(receipts, list) or not receipts or not isinstance(receipts[-1], dict)
+            or not isinstance(check, dict) or check.get('basis') not in ('states_content', 'delegates_elsewhere')):
+        return None
+    last = receipts[-1]
+    if (last.get('stage') != 'provision_check' or last.get('parsed_response') != check
+            or not isinstance(last.get('response'), dict)
+            or any(k in last for k in ('deadline','validation_error','error_type','rate_limit','prior_attempt','purpose'))):
+        return None
+    uid = result.get('citation_aliases', {}).get(check.get('provision_id'))
+    row = next((r for r in selected if r['unit_id'] == uid and r['kind'] == 'body'), None)
+    if not row or any(any(r.get(k) != row.get(k) for k in ('ordin_seq', 'source_url', 'effective_date')) for r in selected):
+        return None
+    originals = result.get('source_citations', [])
+    combined = _HOURS_AND_INSTALLATION.fullmatch(" ".join(question.split()))
+    if combined:
+        rule = _facility_hours_rule(combined['facility'], originals, originals)
+    else:
+        rule = operating_hours_evidence(question, originals, originals)
+    if not rule:
+        return None
+    text, hours = rule
+    parts = [hours]
+    accepted = {('delegates_elsewhere', hours['unit_id'])}
+    if combined:
+        grant = _installation_rule(combined['facility'], combined['actor'], hours, originals)
+        if not grant:
+            return None
+        # The named actor and delegated hours are two separate propositions.
+        # Both full source units must already be owned by the checked claims.
+        parts.append(grant[1])
+        accepted.add(('states_content', grant[1]['unit_id']))
+        text += " " + re.sub(r"있다\.$|한다\.$", lambda m: "있습니다." if m[0] == "있다." else "합니다.", grant[0])
+    selected_by_id = {r['unit_id']: r for r in selected}
+    if ((check.get('basis'), uid) not in accepted or any(
+            original['unit_id'] not in selected_by_id or any(
+                selected_by_id[original['unit_id']].get(k) != original.get(k)
+                for k in ('parent_chunk_id','ordin_seq','source_url','effective_date','quote','locator'))
+            for original in parts)):
+        return None
+    return text + " 실제 운영 시각은 해당 시설 안내에서 확인해 주세요.", parts
+
+
+def operating_hours_evidence(question, candidates, originals):
+    """Find one unconditional operating rule for the single facility and detail requested."""
+    query = _HOURS_QUESTION.fullmatch(" ".join(question.split()))
+    if not query or not originals:
+        return None
+    return _facility_hours_rule(query['facility'], candidates, originals)
+
+
+def _facility_hours_rule(facility, candidates, originals, *, use_owner_context=False):
+    name = facility.replace(" ", "")
+    matches = []
+    for row in candidates:
+        if row['kind'] != 'body' or row.get('context_only') or row['unit_id'] != row['parent_chunk_id']:
+            continue
+        text = _paragraph_wording(row)
+        rule = _OPERATING_RULE.fullmatch(text)
+        if not rule:
+            continue
+        facilities = re.split(r"[ㆍ·]", rule['facilities'].replace(" ", ""))
+        if name not in facilities:
+            # An elided common prefix must also be attested as the whole facility name
+            # in this article, not guessed solely from a suffix such as '센터'.
+            if not any(name.endswith(part) and len(name[:-len(part)]) >= 2
+                       and facilities[0].startswith(name[:-len(part)]) for part in facilities[1:]):
+                continue
+            direct_name = any(r['kind'] == 'body' and r.get('source_url') == row.get('source_url')
+                       and r['locator'].get('article') == row['locator'].get('article')
+                       and name in re.sub(r"\s+", "", r['quote'] + r['locator'].get('title', '')) for r in originals)
+            if not direct_name and not (use_owner_context and _name_in_owner_article(name, row, originals)):
+                continue
+        matches.append((text, row))
+    if len(matches) != 1:
+        return None
+    text, row = matches[0]
+    if any(_SPECIFIC_HOURS.search(r['quote']) for r in originals
+           if r.get('ordin_seq') == row.get('ordin_seq')):
+        return None
+    answer = text.removesuffix(".")
+    answer = re.sub(r"정한다$", "정합니다", answer)
+    answer = re.sub(r"있다$", "있습니다", answer)
+    return "구체적인 운영 시간은 이 조항에 나와 있지 않습니다. " + answer + ".", row
+
+
+def _paragraph_wording(row):
+    text = re.sub(r"^\s*[①-⑳]\s*", "", row['quote']).strip()
+    return re.sub(r"\s*<개정[\d.,\s]+>\s*$", "", text)
+
+
+def _name_in_owner_article(name, row, originals):
+    full_name = re.compile(r"(?<![가-힣])" + r"\s*".join(map(re.escape, name))
+                           + r"(?=[^가-힣]|(?:은|는|을|를|의|이|가|에|에서)(?:\s|$)|$)")
+    for context in originals:
+        if (context['kind'] != 'required_context' or context.get('parent_chunk_id') != row['unit_id']
+                or context['locator'].get('article') != row['locator'].get('article')
+                or any(context.get(k) != row.get(k) for k in ('ordin_seq', 'source_url', 'effective_date', 'as_of_date'))
+                or not context.get('source_unit_id')
+                or context.get('unit_id') != row['unit_id'] + '::context::' + context['source_unit_id']):
+            continue
+        for segment in context.get('source_segments', []):
+            start, end = segment.get('start'), segment.get('end')
+            if (segment.get('kind') == 'provision' and type(start) is int and type(end) is int
+                    and 0 <= start < end <= len(context['quote']) and context['quote'][start:end] == segment.get('text')
+                    and full_name.search(segment['text'])):
+                return True
+    return False
+
+
+def _same_facility_expense(clause, name):
+    if re.search(r"다른\s*(?:시설|곳)|별개|타\s*시설", clause):
+        return False
+    words = list(re.finditer(r"[가-힣]+", clause))
+    for index, token in enumerate(words):
+        word = token[0]
+        noun = re.sub(r"(?:에서는|에서|에는|에게|에도|은|는|이|가|의|을|를|에|도)$", "", word)
+        if len(noun) < 2 or not (name.endswith(noun) or noun == '시설'):
+            continue
+        # The facility must be the thing being funded or installed. A facility
+        # that is merely a landmark for another project cannot establish scope.
+        if not re.match(r"\s*(?:(?:새로|직접|더|추가로)\s+)?"
+                        r"(?:설치|조성|확충|증설|건립|운영|만들|늘리|늘릴|비용|경비|설립)", clause[token.end():]):
+            continue
+        full_mention = re.sub(r"\s+", "", clause[:token.start()] + noun).endswith(name)
+        if (full_mention or index == 0 or words[index - 1][0] in ('그', '이', '해당', '같은', '새')
+                or words[index - 1][0].endswith(('이', '가', '은', '는', '에서'))):
+            return True
+    return False
+
+
+def hours_and_funding_claims(question, citations, originals, crosswalk):
+    """Offer two independently sourced claims to the writer when both topics apply."""
+    text = " ".join(question.split())
+    if not re.search(r"지원|보조|융자", text):
+        return None
+    # An extension of operating hours can simply describe the expense.
+    # Require an actual question about time, or a coordinated time noun and a
+    # distributive request. Keep the original question for the writer in both cases.
+    clock = re.search(r"(?:몇\s*시(?:부터 몇\s*시)?(?:부터|까지|에)|언제까지)\s*"
+                      r"(?:문을?\s*)?(?:운영|개방|이용|열|여|닫|폐장|개장)", text)
+    topic = re.search(r"(?:운영|개방|이용|폐장)\s*(?:시간|시각)(?P<particle>은|는|이|을|과|와)?", text)
+    coordinated = topic and topic['particle'] in ('과', '와')
+    asks_time = (clock
+                 or topic and re.match(r"\s*(?:누가|어떻게|언제|몇\s*시|조례에\s*정)", text[topic.end():])
+                 or coordinated and re.search(r"각각|둘\s*다|두\s*가지", text))
+    if not asks_time:
+        return None
+    # The two proposals below share one jurisdiction. A question explicitly
+    # assigning the issues to different administrations needs the full writer.
+    jurisdictions = re.findall(r"(?<![가-힣])([가-힣]{2,8}(?:특별자치도|시청|도청|시))(?=[은는이가의에\s?.,]|$)", text)
+    if any(place not in ('서울시', '서울특별시', '서울시청') for place in jurisdictions):
+        return None
+    # Require the fiscal clause itself to refer back to the same facility. The
+    # presence of its name in an independent schedule question is insufficient.
+    clauses = [p.strip() for p in re.split(r"[?？.!]+|(?:운영|개방|이용|폐장)\s*(?:시간|시각)(?:과|와)\s+", text)
+               if p.strip()]
+    expense = [part for part in clauses if re.search(r"지원|보조|융자", part)]
+    if len(expense) != 1 or len(clauses) == 1 or not re.search(r"비용|경비|[가-힣]+비(?:를|도|에|가|는|\s)", expense[0]):
+        return None
+    compact = re.sub(r"\s+", "", text)
+    aliases = {uid: alias for alias, uid in crosswalk.items()}
+    bodies = [r for r in citations if r['kind'] == 'body' and not r.get('context_only')
+              and r['unit_id'] == r['parent_chunk_id'] and r['unit_id'] in aliases]
+    pairs = []
+    for row in bodies:
+        operating = _OPERATING_RULE.fullmatch(_paragraph_wording(row))
+        if not operating:
+            continue
+        names = re.split(r"[ㆍ·]", operating['facilities'].replace(" ", ""))
+        # An abbreviated list member ("수리센터") may share a common prefix
+        # with its first member. Match the scope in the question and require
+        # the full name to occur elsewhere in the same article.
+        full_names = [names[0]] + [names[0][:i] + short for short in names[1:] for i in range(2, len(names[0]))]
+        name = next((n for n in sorted(full_names, key=len, reverse=True) if n in compact), None)
+        if not name or not _same_facility_expense(expense[0], name):
+            continue
+        schedule = _facility_hours_rule(name, originals, originals, use_owner_context=True)
+        if not schedule or schedule[1]['unit_id'] != row['unit_id'] or schedule[1]['quote'] != row['quote']:
+            continue
+        grants = [r for r in bodies if r['unit_id'] != row['unit_id']
+                  and all(r.get(k) == row.get(k) for k in ('ordin_seq', 'source_url', 'effective_date'))
+                  and r['locator'].get('article') == row['locator'].get('article')
+                  and (name in re.sub(r"\s+", "", r['quote']) or operating['facilities'] in r['quote'])
+                  and re.search(r"경비|비용|설치비|운영비", r['quote'])
+                  and re.search(r"(?:지원|보조|융자)할 수 있다\.$", _paragraph_wording(r))]
+        if len(grants) != 1:
+            continue
+        grant = grants[0]
+        funding = re.sub(r"할 수 있다\.$", "할 수 있습니다.", _paragraph_wording(grant))
+        installation_grant = (r"(?:시장|도지사|군수|구청장)[은는] (?:[^,.;]+ 노력하여야 하며, )?"
+                              r"[가-힣 ]+(?:에게|에 대하여) 예산의 범위(?: 안)?에서 "
+                              + r"\s*".join(map(re.escape, name)) + r" 설치에 필요한 경비를 지원할 수 있습니다\.")
+        if (re.fullmatch(installation_grant, funding) and funding.count("지원") == 1
+                and re.search(r"연장|늘리|늘릴|확충|증설", text)):
+            funding += " 설치에 들지 않는 비용까지 이 항에서 지원한다고 정한 것은 아닙니다."
+        pairs.append([{"text": schedule[0], "citation_ids": [aliases[row['unit_id']]]},
+                      {"text": funding, "citation_ids": [aliases[grant['unit_id']]]}])
+    return pairs[0] if len(pairs) == 1 else None
+
+
 def public_result(audit, project=None, catalog=None):
     """A verified draft is deliberately distinct from final answer approval.
 
@@ -259,10 +516,14 @@ def public_result(audit, project=None, catalog=None):
             if any(known[uid].get('context_only') for uid in selected):
                 raise ValueError('unrefined_public_claim_citation')
             citation_rows = [row for row in citation_rows if row['unit_id'] in selected]
+        display_answer = draft['answer']
+        hours = _delegated_hours(audit.get('question') or '', result, citation_rows)
+        if hours:
+            display_answer, citation_rows = hours
         sources=render_sources(citation_rows,catalog,owners)
         if not sources:
             raise ValueError('verified_draft_without_public_citations')
-        response={'answer':draft['answer'],'citation':[s['citation'] for s in sources],
+        response={'answer':display_answer,'citation':[s['citation'] for s in sources],
                   'source_url':[s['source_url'] for s in sources],
                   'effective_date':[s['effective_date'] for s in sources]}
         # Preserve the historical single-source string contract when unambiguous.
@@ -287,8 +548,9 @@ def public_result(audit, project=None, catalog=None):
             # The verified model body contains legal propositions only. This
             # mandatory prefix comes from unresolved processing state, with no
             # invented amount, user-fact interpretation, or ordinance citation.
-            output['response']['answer']=(draft['answer']+' '+notice['text'] if source_kind in SOURCE_SCOPE_NOTICES
-                                          else notice['text']+'\n\n'+draft['answer'])
+            if not hours:
+                output['response']['answer']=(display_answer+' '+notice['text'] if source_kind in SOURCE_SCOPE_NOTICES
+                                              else notice['text']+'\n\n'+display_answer)
             output.update(missing_materials=copy.deepcopy(missing),external_material_status='외부 자료 확인 필요',
                           fully_resolved=False,scope_notice=notice)
             if facts:output['missing_information']=copy.deepcopy(facts)
@@ -300,7 +562,8 @@ def public_result(audit, project=None, catalog=None):
                     or result.get('fully_resolved') is not False
                     or result.get('answer_scope')!='ordinance_only'):
                 raise ValueError('partial_clarification_boundary_lost')
-            output['response']['answer']=CLARIFICATION_NOTICE+'\n\n'+draft['answer']
+            if not hours:
+                output['response']['answer']=CLARIFICATION_NOTICE+'\n\n'+draft['answer']
             output.update(missing_information=copy.deepcopy(facts),clarification_required=True,
                           fully_resolved=False)
         return output

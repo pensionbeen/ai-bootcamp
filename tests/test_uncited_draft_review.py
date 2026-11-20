@@ -1,6 +1,7 @@
 import json
 import time
 import unittest
+from unittest.mock import patch
 
 from test_local_rag_answer import FakeClient, generation, replace_source_quote, retrieval
 from local_rag_answer import assess_and_answer, PROVISION_CHECK_DEADLINE_SECONDS, _confirmed_retrieved_absence
@@ -108,6 +109,36 @@ class UncitedAbsenceReviewTests(unittest.TestCase):
                                      started=time.monotonic() - PROVISION_CHECK_DEADLINE_SECONDS)
         self.assertEqual([kind for kind, _ in client.calls], ["draft"])
         self.assertEqual(public["status"], "code_check_failed")
+
+    def test_successful_response_after_the_check_deadline_cannot_confirm_absence(self):
+        clock = [1000.0]
+        def delayed(units):
+            clock[0] += PROVISION_CHECK_DEADLINE_SECONDS + 1
+            return absence(units)
+        with patch("local_rag_answer.time.monotonic", side_effect=lambda: clock[0]):
+            result, public, _ = evaluate("조례는 공포한 날부터 시행한다.", review=delayed, started=clock[0])
+        self.assertEqual(public["status"], "code_check_failed")
+        self.assertFalse(result["uncited_draft_review"]["confirmed_retrieved_absence"])
+        self.assertIn("response", result["audit"][-1])
+        self.assertEqual(result["audit"][-1]["error_type"], "late_provision_check")
+
+    def test_missing_document_alone_needs_a_successful_review_of_the_sources(self):
+        draft = generation(claims=[], decision="external_material_required", missing_materials=["이 조례의 제재 조문"])
+        result, public, _ = evaluate("시장은 시설을 설치할 수 있다.", draft=draft)
+        self.assertEqual(public["status"], "insufficient_evidence")
+        self.assertEqual(result["missing_materials"], [])
+        self.assertEqual(result["audit"][0]["parsed_response"]["missing_materials"], ["이 조례의 제재 조문"])
+        for review in (RuntimeError("transport unavailable"),
+                       lambda units: {**absence(units), "provision_id": units[0]["id"],
+                                      "units": {unit["id"]: "partial" for unit in units}}):
+            result, public, _ = evaluate("제재의 세부 기준은 시장이 따로 정한다.", review, draft=draft)
+            self.assertEqual(result["decision"], "external_material_required")
+            self.assertNotIn("response", public)
+        result, public, client = evaluate("시설에 관한 조례이다.", draft=draft,
+                                          started=time.monotonic() - PROVISION_CHECK_DEADLINE_SECONDS)
+        self.assertEqual([kind for kind, _ in client.calls], ["draft"])
+        self.assertFalse(result["uncited_draft_review"]["confirmed_retrieved_absence"])
+        self.assertNotIn("response", public)
 
     def test_bad_affirmative_draft_and_partial_do_not_trigger_reselection(self):
         for draft in (generation("이용자는 반드시 보호장구를 구입해야 합니다.", ids=[]),

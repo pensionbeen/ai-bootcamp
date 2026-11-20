@@ -19,7 +19,7 @@ OUTPUT_AREA = "data/processed/local_rag/2026-10-01"
 SOURCE_SELECTION_MODULES = ("source_first_answer", "source_candidates", "benefit_selection", "tariff_selection", "partial_benefit_answer",
                             "source_provision_style", "complete_selected_evidence", "grounded_discount_comparison",
                             "answer_fact_coverage", "simple_source_answer", "delegated_fee_answer",
-                            "referenced_publicity_answer")
+                            "referenced_publicity_answer", "scoped_benefit_answer", "benefit_procedure")
 
 
 def database_identity(database):
