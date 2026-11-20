@@ -52,6 +52,7 @@ import uuid
 from urllib.parse import parse_qs, urlsplit
 
 from concise_public_answer import concise_answer
+from kakao_skill import DEFAULT_CALLBACK_HOSTS, KAKAO_SKILL_PATH, KakaoSkill, render as kakao_render
 from request_audit import RequestAudit
 from submission_http import SubmissionCheck
 
@@ -60,6 +61,7 @@ INQUIRY_URL = "https://www.epeople.go.kr/"
 JOB_AREA = "data/processed/local_rag/2026-10-01/service_jobs"
 JOB_ID = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BODY = 32768
+KAKAO_MAX_BODY = 65536
 MAX_QUESTION = 16000
 ASYNC_WAIT_LIMIT = 75
 SYNC_WAIT_SECONDS = 80
@@ -490,6 +492,24 @@ def sync_view(job):
     return view
 
 
+def kakao_resolver(jobs):
+    """카카오 스킬용: 질문을 /ui/ask와 같은 큐로 처리하고 deadline까지 기다려 sync_view를 돌려줍니다."""
+    def resolve(question, deadline):
+        try:
+            job = jobs.submit(question.strip())
+        except Busy:
+            return {"status": "queue_full", "answer": UNKNOWN, "citation": []}, 200
+        except Exception:
+            return {"status": "processing_error", "answer": UNKNOWN, "citation": []}, 200
+        while job["status"] in ("queued", "running"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            job = jobs.wait(job["job_id"], min(remaining, 5))
+        return sync_view(job), 200
+    return resolve
+
+
 def _kit_response(job):
     """Public response of a completed job that fits the kit body, else None."""
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
@@ -652,6 +672,27 @@ class Handler(BaseHTTPRequestHandler):
             value.update(answer=UNKNOWN, citation=[])
         self._send(status, value)
 
+    def _kakao_skill(self):
+        """POST /kakao/skill: 카카오 i 오픈빌더 스킬. 카카오가 읽을 수 있게 항상 HTTP 200과 응답 JSON 2.0을 보냅니다."""
+        kakao = getattr(self.server, "kakao", None)
+        lengths = self.headers.get_all("Content-Length", [])
+        if kakao is None:
+            return self._error(404, "not_found")
+        if (self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1
+                or not re.fullmatch(r"[0-9]{1,6}", lengths[0]) or int(lengths[0]) > KAKAO_MAX_BODY):
+            return self._error(400, "invalid_kakao_request")
+        try:
+            self.connection.settimeout(5)
+            content = self.rfile.read(int(lengths[0]))
+            payload = json.loads(content)
+        except (ValueError, UnicodeError, TimeoutError, OSError):
+            return self._error(400, "invalid_kakao_request")
+        try:
+            body = kakao.handle(payload)
+        except Exception:
+            body = kakao_render(None, {"kind": "retry", "text": "처리 중 오류가 났어요. 잠시 후 다시 보내 주세요."})
+        self._send(200, body)
+
     def _local(self):
         port = str(self.server.server_port)
         hosts = self.headers.get_all("Host", [])
@@ -707,6 +748,8 @@ class Handler(BaseHTTPRequestHandler):
         self._kit = self.path == "/ask"
         if not self._local():
             return self._error(403, "local_origin_required")
+        if self.path == KAKAO_SKILL_PATH:
+            return self._kakao_skill()
         if self.path not in ASK_PATHS and self.path != SUBMISSION_CHECK_PATH:
             return self._error(404, "not_found")
         lengths = self.headers.get_all("Content-Length", [])
@@ -818,6 +861,8 @@ def create_server(project, port=8000, *, runtime=None, publicizer=None, health_p
             server.request_audit = None
         server.submission_check = submission_check
         server.jobs, server.bound_host = jobs, host
+        hosts = tuple(h.strip().lower() for h in os.environ.get("KAKAO_CALLBACK_HOSTS", "").split(",") if h.strip())
+        server.kakao = KakaoSkill(kakao_resolver(jobs), callback_hosts=hosts or DEFAULT_CALLBACK_HOSTS)
         return server
     except Exception:
         jobs.close()
