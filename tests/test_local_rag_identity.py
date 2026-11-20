@@ -11,7 +11,7 @@ from unittest.mock import patch, Mock
 import ask_local_rag
 
 IDENTITY_MODULES = ("search_local_rag", "local_rag_answer", "local_rag_client", "public_rag_response",
-                    "rag_numeric_amounts", "release_policy")
+                    "rag_numeric_amounts", "release_policy", *ask_local_rag.SOURCE_SELECTION_MODULES)
 DB = {"database_sha256": "a" * 64, "identity": "test-db", "as_of_date": "2026-10-01"}
 
 
@@ -22,8 +22,7 @@ class PublicDependencyIdentityTests(unittest.TestCase):
                     dir=Path(__file__).resolve().parents[1],prefix='single-generation-test-') as folder:
                 project=Path(folder)
                 modules={}
-                for name in ('search_local_rag','local_rag_answer','local_rag_client','public_rag_response',
-                             'rag_numeric_amounts','release_policy'):
+                for name in IDENTITY_MODULES:
                     path=project/(name+'.py');path.write_text('# test identity\n',encoding='utf-8')
                     modules[name]=types.SimpleNamespace(__file__=str(path))
                 retrieval={'top_k':8,'evidence':[]}
@@ -78,6 +77,9 @@ class PublicDependencyIdentityTests(unittest.TestCase):
                 notice_file = Path(modules["public_rag_response"].__file__)
                 notice_file.write_text("NOTICE = 'changed'\n", encoding="utf-8")
                 second = ask_local_rag.run_question(project, "같은 질문", check_only=True)
+                selector = Path(modules["source_first_answer"].__file__)
+                selector.write_text("# updated source selection\n", encoding="utf-8")
+                third = ask_local_rag.run_question(project, "같은 질문", check_only=True)
             self.assertEqual(first["status"], "check_only")
             self.assertEqual(second["status"], "check_only")
             self.assertEqual(first["called"], second["called"])
@@ -87,6 +89,8 @@ class PublicDependencyIdentityTests(unittest.TestCase):
                              hashlib.sha256(notice_file.read_bytes()).hexdigest())
             self.assertNotEqual(first["run_identity"], second["run_identity"])
             self.assertNotEqual(first["output_paths"], second["output_paths"])
+            self.assertNotEqual(second["run_identity"], third["run_identity"])
+            self.assertEqual(third["called"], 0)
             self.assertFalse((project / "data").exists())
 
 
@@ -209,11 +213,24 @@ class RateLimitedDraftIsNotSavedTests(unittest.TestCase):
             return Response(status, {"model": CHAT_MODEL, "choices": []}, "120" if status == 429 else None)
         return send
 
-    def run_once(self, **client_options):
+    def run_once(self, attempt_id=None, **client_options):
         with patch.object(ask_local_rag, "database_identity", return_value=DB), \
                 patch.object(ask_local_rag.importlib, "import_module", side_effect=self.modules().__getitem__), \
                 patch.dict(os.environ, {"UPSTAGE_API_KEY": "fake-unit-test-secret"}):
-            return ask_local_rag.run_question(self.project, self.QUESTION, client_options=client_options or None)
+            return ask_local_rag.run_question(self.project, self.QUESTION, client_options=client_options or None,
+                                              attempt_id=attempt_id)
+
+    def test_new_submission_reuses_only_embedding_even_after_a_legacy_answer(self):
+        transport = self.transport([200] * 3, check_statuses=[200] * 3)
+        legacy = self.run_once(transport=transport)
+        first = self.run_once(attempt_id="first", transport=transport)
+        repeated = self.run_once(attempt_id="second", transport=transport)
+        self.assertEqual(len({a["run_identity"] for a in (legacy, first, repeated)}), 3)
+        self.assertEqual(self.sent, ["embedding", "draft", "check", "draft", "check", "draft", "check"])
+        same_job = self.run_once(attempt_id="first", transport=transport)
+        self.assertTrue(same_job["cached"])
+        self.assertEqual(same_job["called"], 0)
+        self.assertEqual(same_job["output_paths"], first["output_paths"])
 
     def test_deadline_mode_draft_429_is_not_saved_and_the_rerun_sends_attempt_two(self):
         options = {"parallel": True, "deadline_seconds": 75, "sleeper": self.sleep, "clock": lambda: self.now}

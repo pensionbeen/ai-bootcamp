@@ -212,6 +212,15 @@ class WonArithmeticTests(unittest.TestCase):
                                expression="1200000÷400000", result="3")
         self.assertEqual(checked["status"], "failed", checked)
 
+    def test_punctuation_before_a_word_does_not_create_a_won_amount(self):
+        for text in ("무료이고, 원칙적으로 요금이 없다.", "납부했다. 원문은 별표에 있다."):
+            self.assertEqual(won_literals(text), [])
+        for amount in ("420원", "21,000원", "3만 2천원"):
+            text = f"요금은 {amount}이고, 원칙적으로 현장에서 납부한다."
+            self.assertEqual([s["literal"] for s in won_literals(text)], [amount])
+        for bad in (",300원", ".7원", "3,50원", "3.1.5원", ",~3,000원"):
+            self.assertTrue(any(s["value"] is None for s in won_literals(bad)), bad)
+
     def test_malformed_currency_is_never_partially_converted(self):
         for literal in ("12,34원", "1만2만원", "2천3천원", "1.2만5천원", "1조원", "1만원원"):
             checked = self.checked("금액은 " + literal + "입니다.", quote=literal)

@@ -186,11 +186,12 @@ class SendGate:
 class Client:
     def __init__(self, project, cache_dir=None, *, read_only=False, check_only=False,
                  env_file=None, transport=None, sleeper=None, clock=None,
-                 parallel=False, deadline_seconds=None, gate=None):
+                 parallel=False, deadline_seconds=None, gate=None, generation_run=None):
         self.project = Path(project).resolve(strict=True)
         self.cache_dir = Path(cache_dir or self.project / "data/processed/local_rag/2026-10-01/request_cache").resolve()
         require(self.cache_dir.is_relative_to(self.project), "cache_outside_project")
         self.read_only = read_only or check_only
+        self.generation_run = generation_run
         self.env_file = Path(env_file) if env_file else self.project / ".env"
         self._transport = transport
         self._sleep = sleeper or time.sleep
@@ -353,6 +354,8 @@ class Client:
             require(isinstance(payload.get("input"), list) and len(payload["input"]) == 1 and
                     isinstance(payload["input"][0], str) and payload["input"][0].strip(), "only_one_question_embedding_allowed")
         descriptor = {"endpoint": ENDPOINTS[kind], "kind": kind, "payload": payload}
+        if kind != "embedding" and self.generation_run is not None:
+            descriptor["generation_run"] = self.generation_run
         wire, wire_format = request_wire(kind, payload)
         if wire_format:
             descriptor.update(wire_format=wire_format, wire_sha256=digest(wire))

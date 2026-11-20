@@ -16,6 +16,10 @@ from local_rag_client import Client, QUERY_MODEL, digest, raw, read, require, sa
 ASOF = "2026-10-01"
 DEFAULT_DATABASE = "data/processed/rag/2026-10-01/71ce40874477c9a4bc9d/rag.sqlite3"
 OUTPUT_AREA = "data/processed/local_rag/2026-10-01"
+SOURCE_SELECTION_MODULES = ("source_first_answer", "source_candidates", "benefit_selection", "tariff_selection", "partial_benefit_answer",
+                            "source_provision_style", "complete_selected_evidence", "grounded_discount_comparison",
+                            "answer_fact_coverage", "simple_source_answer", "delegated_fee_answer",
+                            "referenced_publicity_answer")
 
 
 def database_identity(database):
@@ -60,7 +64,8 @@ def code_identity(modules):
     return {"files": sources, "sha256": digest(raw(sources))}
 
 
-def run_question(project, question, db_path=None, check_only=False, env_file=None, client_options=None):
+def run_question(project, question, db_path=None, check_only=False, env_file=None, client_options=None,
+                 *, attempt_id=None):
     # `client_options` (service only) are transport options passed to Client
     # (parallel, deadline_seconds, gate); never part of the question identity.
     # Question start for the provision-check deadline: before database
@@ -84,14 +89,21 @@ def run_question(project, question, db_path=None, check_only=False, env_file=Non
         # releasable check issues): a change to either must not reuse a saved audit.
         numeric_module = importlib.import_module("rag_numeric_amounts")
         release_module = importlib.import_module("release_policy")
+        selectors = [importlib.import_module(name) for name in SOURCE_SELECTION_MODULES]
         code = code_identity([retrieval_module, answer_module, client_module, public_module,
-                              numeric_module, release_module])
+                              numeric_module, release_module, *selectors])
         identity = {"question": question, "database": db, "code": code,
                     "schema_version": "local-rag-single-question-v1", "as_of_date": ASOF,
                     "answer_allowed": False}
+        if attempt_id is not None:
+            identity["attempt_id"] = attempt_id
         run_hash = digest(raw(identity))
-        folder = (project / OUTPUT_AREA / db["database_sha256"][:20] /
-                  code["sha256"][:20] / digest(question.encode("utf-8"))[:20]).resolve()
+        if attempt_id is None:
+            folder = (project / OUTPUT_AREA / db["database_sha256"][:20] /
+                      code["sha256"][:20] / digest(question.encode("utf-8"))[:20])
+        else:
+            folder = project / OUTPUT_AREA / "runs" / run_hash
+        folder = folder.resolve()
         require(folder.is_relative_to(project), "output_outside_project")
         audit_path = folder / "audit.json"
         manifest_path = folder / "audit.manifest.json"
@@ -110,13 +122,17 @@ def run_question(project, question, db_path=None, check_only=False, env_file=Non
                     "question": question, "run_identity": run_hash, "called": 0,
                     "cache_complete": False, "answer_allowed": False,
                     "final_answer_generated": False, "output_paths": paths}
-        client = Client(project, env_file=env_file, **(client_options or {}))
+        options = dict(client_options or {})
+        if attempt_id is not None:
+            options["generation_run"] = run_hash
+        client = Client(project, env_file=env_file, **options)
         # Serialize the whole question as well as individual provider calls.
         from request_lock import request_lock
         with request_lock(folder / ".question.lock"):
             # Another process may have completed this question while we waited.
             if audit_path.exists() or manifest_path.exists():
-                return run_question(project, question, db_path=database, check_only=True, env_file=env_file)
+                return run_question(project, question, db_path=database, check_only=True, env_file=env_file,
+                                    attempt_id=attempt_id)
             save(folder / "input.json", {**identity, "run_identity": run_hash})
             body, embedding_meta = client.request("embedding", {"model": QUERY_MODEL, "input": [question]})
             vector = query_vector(body)

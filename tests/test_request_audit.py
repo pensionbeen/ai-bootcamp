@@ -90,7 +90,7 @@ class RequestAuditHTTPTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name)
         self.runtime = FakeRuntime()
-        self.runtime.cached.add("question")
+        self.runtime.release.set()
         with patch.dict(os.environ, {"REQUEST_LOG_PASSWORD": "테스트-password"}):
             self.server = local_rag_service.create_server(self.project, 0, runtime=self.runtime,
                 publicizer=full_publicizer, health_provider=health, readiness_provider=ready)

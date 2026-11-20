@@ -2309,9 +2309,8 @@ class ProvisionCheckTests(unittest.TestCase):
         from local_rag_service import sync_view
         _, withheld = self.run_case(self.check("NONE", "no_provision"))
         public = public_result({"status": "completed", "result": withheld}, catalog={})
-        # Existing branch: a generated-but-unpublished single-generation draft.
-        self.assertEqual(public["status"], "code_check_failed")
-        self.assertNotIn("response", public)
+        self.assertEqual(public["status"], "insufficient_evidence")
+        self.assertEqual(public["response"], {"answer": "확인 불가", "citation": []})
         view = sync_view({"status": "completed", "job_id": "a" * 64, "result": public})
         self.assertEqual((view["answer"], view["citation"], view["status"]), ("확인 불가", [], "completed"))
         _, published = self.run_case(self.check("NONE", "delegates_elsewhere"))

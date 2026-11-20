@@ -27,8 +27,8 @@ only decides whether a queued question is answered or reported as
 `deadline_exceeded` within that bound; a full queue answers at once (429 for
 asynchronous callers, HTTP 200 "확인 불가" with `X-Rag-Status: queue_full` on /ask).
 
-Concurrency: different questions run in different workers at the same time; the
-same question is one job. The default runtime gives each question's client a
+Concurrency: submissions of the same question share an active job. Submitting
+after completion starts a new job. The default runtime gives each question's client a
 per-request-body lock (different bodies are sent at the same time), a
 CLIENT_DEADLINE_SECONDS deadline for the HTTP 429 resend and one SendGate shared
 by all workers, so a 429 pauses new sends of every worker until its resend time.
@@ -51,10 +51,12 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
+from concise_public_answer import concise_answer
 from request_audit import RequestAudit
 from submission_http import SubmissionCheck
 
 SUBMISSION_CHECK_PATH = "/test/submission"
+INQUIRY_URL = "https://www.epeople.go.kr/"
 JOB_AREA = "data/processed/local_rag/2026-10-01/service_jobs"
 JOB_ID = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BODY = 32768
@@ -182,6 +184,20 @@ class PreflightError(RuntimeError):
     pass
 
 
+def citizen_public_result(audit, project):
+    from grounded_discount_comparison import compact_discount_comparison
+    from public_rag_response import public_result
+
+    view = public_result(audit, project)
+    result = audit.get("result") or {}
+    response = view.get("response")
+    if isinstance(response, dict) and result.get("draft_status") == "code_checked_draft":
+        shorter = compact_discount_comparison(audit.get("question", ""), response, result)
+        if shorter:
+            response["answer"] = shorter
+    return view
+
+
 class Jobs:
     def __init__(self, project, *, runtime=None, publicizer=None, health_provider=None,
                  queue_size=DEFAULT_QUEUE_SIZE, readiness_provider=None, workers=DEFAULT_WORKERS):
@@ -203,13 +219,13 @@ class Jobs:
                 runtime = self._default_runtime(run_question, self.gate)
             health_provider = health_provider or (lambda: database_identity(self.project / DEFAULT_DATABASE))
         if publicizer is None:
-            from public_rag_response import public_result
-            publicizer = public_result
+            publicizer = citizen_public_result
         self.runtime, self.publicizer = runtime, publicizer
         self.health_provider = health_provider
         self.readiness_provider = readiness_provider or (lambda: service_readiness(self.project))
         self.lock = threading.RLock()
         self.records, self.events = {}, {}
+        self.latest = {}
         self.workers, self.queue_size = workers, queue_size
         self.slots = threading.BoundedSemaphore(workers + queue_size)
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="local-rag")
@@ -224,13 +240,17 @@ class Jobs:
                 record["status"] = "interrupted"
                 self._save(record)
             self.records[path.stem] = record
+            if "attempt_id" in record:
+                prior = self.latest.get(record["question"])
+                if prior is None or self.records[prior]["created_ns"] < record["created_ns"]:
+                    self.latest[record["question"]] = path.stem
 
     @staticmethod
     def _default_runtime(run_question, gate):
-        """run_question with the service's client options; the call shape is unchanged."""
-        def runtime(project, question, check_only=False):
+        """Bind the shared send gate; each new submission gets its own generation receipts."""
+        def runtime(project, question, check_only=False, *, attempt_id=None):
             options = {"parallel": True, "deadline_seconds": CLIENT_DEADLINE_SECONDS, "gate": gate}
-            return run_question(project, question, check_only=check_only, client_options=options)
+            return run_question(project, question, check_only=check_only, client_options=options, attempt_id=attempt_id)
         return runtime
 
     def _save(self, record):
@@ -244,8 +264,8 @@ class Jobs:
         result.update(answer_allowed=False, final_answer_generated=False)
         return result
 
-    def _cached(self, question):
-        audit = self.runtime(self.project, question, check_only=True)
+    def _cached(self, question, attempt_id):
+        audit = self.runtime(self.project, question, check_only=True, attempt_id=attempt_id)
         if not isinstance(audit, dict) or audit.get("status") == "processing_error":
             raise PreflightError("read_only_preflight_failed")
         identity = audit.get("run_identity")
@@ -255,32 +275,51 @@ class Jobs:
         return identity, self._public_result(audit) if complete else None
 
     def submit(self, question):
-        identity, cached = self._cached(question)
         with self.lock:
-            if cached is not None:
-                record = {"job_id": identity, "run_identity": identity, "question": question,
-                          "status": "completed", "result": cached, "cached": True}
-                self.records[identity] = record
-                self._save(record)
-                return self.public(record)
-            previous = self.records.get(identity)
-            if previous is not None and not self._requeue_allowed(previous):
+            previous = self.records.get(self.latest.get(question))
+            if previous is not None and previous["status"] in ("queued", "running"):
                 return self.public(previous)
+            retry = previous is not None and previous["status"] in REQUEUE_STATUSES
+            attempt_id = previous["attempt_id"] if retry else uuid.uuid4().hex
+            previous_status = previous["status"] if previous else None
+        # This reads and hashes the database. Other requests can poll or finish meanwhile.
+        identity, cached = self._cached(question, attempt_id)
+        with self.lock:
+            current = self.records.get(self.latest.get(question))
+            if current is not previous or (current and current["status"] != previous_status):
+                # A concurrent submission or recovery took responsibility for this question.
+                return self.public(current)
+            if retry and previous["job_id"] != identity:
+                retry = False
+            if retry:
+                if cached is not None:
+                    previous.update(status="completed", result=cached, cached=True)
+                    self._save(previous)
+                    return self.public(previous)
+                if not self._requeue_allowed(previous):
+                    return self.public(previous)
             if self.closed or not self.slots.acquire(blocking=False):
                 raise Busy("queue_full")
-            record = {"job_id": identity, "run_identity": identity, "question": question,
-                      "status": "queued", "cached": False}
+            created_ns = time.time_ns()
             if previous is not None:
+                created_ns = previous["created_ns"] if retry else max(created_ns, previous["created_ns"] + 1)
+            record = {"job_id": identity, "run_identity": identity, "question": question,
+                      "status": "queued", "cached": False, "attempt_id": attempt_id,
+                      "created_ns": created_ns}
+            if retry:
                 record["requeues"] = previous.get("requeues", 0) + 1
             event = threading.Event()
             try:
                 self._save(record)
                 self.records[identity], self.events[identity] = record, event
+                self.latest[question] = identity
                 self.executor.submit(self._work, identity, event)
             except Exception:
-                if previous is not None:
-                    self.records[identity] = previous
                 self.slots.release()
+                if self.records.get(identity) is record:
+                    record["status"] = "failed"
+                    event.set()
+                    self._save(record)
                 raise
             return self.public(record)
 
@@ -297,13 +336,14 @@ class Jobs:
                 record["status"] = "running"
                 self._save(record)
                 question = record["question"]
-            current_identity, cached = self._cached(question)
+                attempt_id = record["attempt_id"]
+            current_identity, cached = self._cached(question, attempt_id)
             if current_identity != identity:
                 raise PreflightError("queued_identity_changed")
             if cached is not None:
                 result = cached
             else:
-                audit = self.runtime(self.project, question, check_only=False)
+                audit = self.runtime(self.project, question, check_only=False, attempt_id=attempt_id)
                 if not isinstance(audit, dict) or audit.get("run_identity") != identity:
                     raise PreflightError("runtime_identity_changed")
                 result = self._public_result(audit)
@@ -332,6 +372,15 @@ class Jobs:
                   "answer_allowed": False, "final_answer_generated": False}
         if "result" in record:
             result["result"] = copy.deepcopy(record["result"])
+            # Format the outgoing copy only. Cached answers and their audit stay verbatim.
+            details = result["result"]
+            response = details.get("response") if isinstance(details, dict) else None
+            if (record["status"] == "completed" and isinstance(response, dict)
+                    and isinstance(response.get("answer"), str) and isinstance(response.get("citation"), list)):
+                response["answer"] = concise_answer(response["answer"], response["citation"])
+                if (details.get("status") in ("insufficient_evidence", "out_of_scope")
+                        and response["answer"] == UNKNOWN and response["citation"] == []):
+                    details["inquiry_url"] = INQUIRY_URL
         if record["status"] in ("queued", "running"):
             result["poll_url"] = "/jobs/" + record["job_id"]
         if record["status"] == "interrupted":
@@ -346,13 +395,14 @@ class Jobs:
             question = record["question"] if record["status"] == "interrupted" else None
         if question is not None:
             # Recover only an already completed, identity-matching pipeline cache.
-            recovered_identity, cached = self._cached(question)
+            recovered_identity, cached = self._cached(question, record.get("attempt_id"))
             if recovered_identity == identity and cached is not None:
                 with self.lock:
-                    record.update(status="completed", result=cached, cached=True)
-                    self._save(record)
+                    if self.records[identity] is record and record["status"] == "interrupted":
+                        record.update(status="completed", result=cached, cached=True)
+                        self._save(record)
         with self.lock:
-            return self.public(record)
+            return self.public(self.records[identity])
 
     def wait(self, identity, seconds):
         with self.lock:
@@ -713,9 +763,10 @@ class Handler(BaseHTTPRequestHandler):
                 job = self.server.jobs.wait(job["job_id"], remaining)
             if self._kit:
                 # Grader cannot read 202/5xx bodies: always 200 with the kit's four keys.
-                # The header keeps errors distinguishable from a legal "확인 불가".
-                return self._send(200, kit_view(job), {"X-Rag-Status": kit_status(job),
-                                                       "X-Rag-Job-Id": job["job_id"]})
+                headers = {"X-Rag-Status": kit_status(job), "X-Rag-Job-Id": job["job_id"]}
+                if headers["X-Rag-Status"] == "completed" and job["result"].get("inquiry_url") == INQUIRY_URL:
+                    headers["Link"] = f'<{INQUIRY_URL}>; rel="help"'
+                return self._send(200, kit_view(job), headers)
             if sync:
                 return self._send(200, sync_view(job))
             self._send(self._job_status(job), job)

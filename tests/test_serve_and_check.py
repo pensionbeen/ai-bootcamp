@@ -2,18 +2,21 @@
 import contextlib
 import io
 import json
-import os
 import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import serve_and_check as sac  # noqa: E402
+from local_rag_service import create_server
+from request_audit import RequestAudit
+from test_local_rag_service import FakeRuntime, full_publicizer, health, ready
 
 FAKE_SERVER = textwrap.dedent("""
     import json, sys, time
@@ -114,142 +117,137 @@ class ServeAndCheckTests(unittest.TestCase):
         self.assertIn("health_timeout", out.getvalue())
         self.assertIn("서버 종료", out.getvalue())
 
-    def _job(self, folder, question, status="completed", result=None, name="a", response=None):
-        """Write one service job record (the shape Jobs._save writes) and return its path."""
-        folder.mkdir(parents=True, exist_ok=True)
-        identity = name * 64
-        if result is None:
-            result = {"status": "verified_draft",
-                      "response": {"answer": "답", "citation": []} if response is None else response}
-        record = {"job_id": identity, "run_identity": identity, "question": question, "status": status,
-                  "cached": False, "result": result}
-        path = folder / (identity + ".json")
-        path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-        return path
 
-    def test_kit_receives_the_full_ask_endpoint(self):
-        port = free_port()
-        folder = Path(self.tmp.name)
-        kit = folder / "check.py"
-        (folder / "sample_questions.json").write_text('[{"id":"S1"}]', encoding="utf-8")
-        kit.write_text(textwrap.dedent("""
+class KitRequestChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name)
+        self.kit = self.project / "check.py"
+        self.kit.touch()
+        self.report = self.project / "results" / "check.json"
+        self.report.parent.mkdir()
+        self.log = self.project / sac.AUDIT_PATH
+        self.audit = RequestAudit(self.project)
+        self.addCleanup(self.audit.close)
+        self.response = {"answer": "답", "citation": ["제1조"], "source_url": "https://example.invalid",
+                         "effective_date": "2026-01-01"}
+        self.row = {"id": "S1", "question": "질문", "format_ok": True, "error": None, "sec": 1,
+                    "response": self.response}
+
+    def record(self, row, **changes):
+        seq = self.audit.begin({}, "127.0.0.1")
+        fields = {"question": row["question"], "response": row["response"], "http_status": 200,
+                  "rag_status": "completed", "write_outcome": "written", "elapsed_ms": 1}
+        self.audit.update(seq, **{**fields, **changes})
+        return seq
+
+    def check(self, rows, record_requests, samples=None):
+        if samples is None:
+            samples = [{"id": row["id"], "question": row["question"]} for row in rows]
+        (self.project / "sample_questions.json").write_text(json.dumps(samples), encoding="utf-8")
+
+        def run(command, **kwargs):
+            record_requests()
+            self.report.write_text(json.dumps(rows), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, f"저장: {self.report}\n", "")
+
+        with patch.object(sac.subprocess, "run", side_effect=run):
+            return sac.run_kit_check(sys.executable, self.kit, "http://127.0.0.1:8010/ask", self.log)
+
+    def test_kit_receives_full_endpoint_and_reports_the_http_body(self):
+        # The real service formats percentages on the outgoing copy. Its saved job keeps the original.
+        runtime = FakeRuntime()
+        runtime.release.set()
+
+        def publicizer(audit, project):
+            result = full_publicizer(audit, project)
+            result["response"]["answer"] = "주차요금의 100분의 50을 감면할 수 있습니다."
+            return result
+
+        server = create_server(self.project, port=0, runtime=runtime, publicizer=publicizer,
+                               health_provider=health, readiness_provider=ready)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        (self.project / "sample_questions.json").write_text('[{"id": "S1", "question": "할인"}]', encoding="utf-8")
+        self.kit.write_text(textwrap.dedent("""
             import json, sys
             from pathlib import Path
+            from urllib.request import Request, urlopen
+
             print(sys.argv[1:])
+            request = Request(sys.argv[2], json.dumps({"question": "할인"}).encode(),
+                              headers={"Content-Type": "application/json"})
+            with urlopen(request, timeout=5) as reply:
+                response = json.load(reply)
+            assert response["answer"] == "주차요금의 50%를 감면할 수 있습니다."
+            row = {"id": "S1", "question": "할인", "sec": 1, "format_ok": True, "error": None, "response": response}
             path = Path.cwd() / "results" / "check.json"
-            path.parent.mkdir()
-            path.write_text(json.dumps([{"id": "S1", "question": "질문 하나", "format_ok": True, "sec": 1,
-                "error": None, "response": {"answer": "답", "citation": ["제1조"],
-                "source_url": "https://example.invalid", "effective_date": "2026-01-01"}, "score": 0}]),
-                encoding="utf-8")
+            path.write_text(json.dumps([row]), encoding="utf-8")
             print("저장:", path)
         """), encoding="utf-8")
-        jobs = folder / "service_jobs"
-        self._job(jobs, "질문 하나", response={"answer": "답", "citation": ["제1조"],
-                                              "source_url": ["https://example.invalid"]})
-        with patch.object(sac, "JOB_FOLDER", jobs):
-            code, out = self._run("good", ["--port", str(port), "--kit-check", str(kit)])
-        self.assertEqual(code, 0, out)
-        self.assertIn(repr(["--url", f"http://127.0.0.1:{port}/ask"]), out)
-        self.assertIn("[PASS] 제출 응답 형식·시간 1/1", out)
+        port = server.server_port
+        with patch.object(sac, "REQUEST_LOG", self.log), patch.object(sac, "start_server") as start, \
+                patch.object(sac, "stop_server"), contextlib.redirect_stdout(io.StringIO()) as output:
+            start.return_value.poll.return_value = None
+            code = sac.main(["--port", str(port), "--kit-check", str(self.kit), "--log", str(self.project / "serve.log")])
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn(repr(["--url", f"http://127.0.0.1:{port}/ask"]), output.getvalue())
 
-    def test_kit_zero_exit_with_bad_rows_fails(self):
-        folder = Path(self.tmp.name)
-        kit = folder / "check.py"
-        kit.touch()
-        (folder / "sample_questions.json").write_text('[{"id":"S1"}]', encoding="utf-8")
-        report = folder / "results" / "check.json"
-        report.parent.mkdir()
-        jobs = folder / "service_jobs"
-        self._job(jobs, "질문")
-        result = subprocess.CompletedProcess([], 0, f"저장: {report}\n", "")
-        row = {"id": "S1", "question": "질문", "format_ok": True, "sec": 1, "error": None,
-               "response": {"answer": "답", "citation": [], "source_url": "", "effective_date": ""}}
-        with patch.object(sac.subprocess, "run", return_value=result):
-            report.write_text(json.dumps([row]), encoding="utf-8")
-            code, out = sac.run_kit_check(sys.executable, kit, "http://127.0.0.1:8010/ask", jobs_folder=jobs)
-            self.assertEqual(code, 0, out)
-        for updates in ({"error": "timeout"}, {"format_ok": False}, {"sec": 91}, {"id": "S2"},
-                        {"response": {**row["response"], "status": "completed"}},
-                        {"response": {"answer": "답", "citation": []}}, {"response": {}},
-                        {"question": "기록 없는 질문"}):
-            with self.subTest(updates=updates), patch.object(sac.subprocess, "run", return_value=result):
-                report.write_text(json.dumps([{**row, **updates}]), encoding="utf-8")
-                code, out = sac.run_kit_check(sys.executable, kit, "http://127.0.0.1:8010/ask", jobs_folder=jobs)
-                self.assertNotEqual(code, 0, out)
+    def test_old_or_missing_requests_cannot_validate_a_report(self):
+        self.record(self.row)
+        code, _ = self.check([self.row], lambda: None)
+        self.assertEqual(code, 1)
 
-    def test_kit_check_reads_the_server_job_record_outcome(self):
-        folder = Path(self.tmp.name)
-        kit = folder / "check.py"
-        kit.touch()
-        (folder / "sample_questions.json").write_text('[{"id":"S1"}]', encoding="utf-8")
-        report = folder / "results" / "check.json"
-        report.parent.mkdir()
-        result = subprocess.CompletedProcess([], 0, f"저장: {report}\n", "")
-        unknown = {"answer": "확인 불가", "citation": [], "source_url": "", "effective_date": ""}
-        report.write_text(json.dumps([{"id": "S1", "question": " 질문 ", "format_ok": True, "sec": 1,
-                                       "error": None, "response": unknown}]), encoding="utf-8")
-        cases = ((("running", None), "S1(job_running)"),
-                 (("failed", {"status": "processing_error"}), "S1(job_failed)"),
-                 (("interrupted", None), "S1(job_interrupted)"),
-                 (("completed", {"status": "processing_error"}), "S1(job_processing_error)"),
-                 (None, "S1(job_record_missing)"),
-                 (("completed", {"status": "insufficient_evidence"}), "S1(job_record_mismatch)"),
-                 (("completed", {"status": "insufficient_evidence",
-                                 "response": {"answer": "확인 불가", "citation": []}}), None))
-        for index, (job, expected) in enumerate(cases):
-            jobs = folder / ("jobs%d" % index)
-            jobs.mkdir()
-            if job is not None:
-                self._job(jobs, "질문", *job)
-            with self.subTest(job=job), patch.object(sac.subprocess, "run", return_value=result):
-                code, out = sac.run_kit_check(sys.executable, kit, "http://127.0.0.1:8010/ask", jobs_folder=jobs)
-                if expected is None:
-                    self.assertEqual(code, 0, out)
-                else:
-                    self.assertEqual(code, 1, out)
-                    self.assertIn(expected, out)
+    def test_repeated_question_uses_each_http_response_in_order(self):
+        other = {**self.row, "id": "S2", "response": {**self.response, "answer": "두 번째 답"}}
+        self.record(other)
+        def during_run():
+            self.record(self.row)
+            self.record({**self.row, "question": "다른 요청"})
+            self.record(other)
+        self.assertEqual(self.check([self.row, other], during_run)[0], 0)
+        self.assertEqual(self.check([other, self.row], during_run)[0], 1)
+        # An extra request for this question makes attribution ambiguous.
+        self.assertEqual(self.check([self.row], during_run)[0], 1)
 
-    def test_kit_row_must_match_the_job_record_response(self):
-        folder = Path(self.tmp.name)
-        kit = folder / "check.py"
-        kit.touch()
-        (folder / "sample_questions.json").write_text('[{"id":"S1"}]', encoding="utf-8")
-        report = folder / "results" / "check.json"
-        report.parent.mkdir()
-        result = subprocess.CompletedProcess([], 0, f"저장: {report}\n", "")
-        report.write_text(json.dumps([{"id": "S1", "question": "질문", "format_ok": True, "sec": 1, "error": None,
-                                       "response": {"answer": "답", "citation": ["제1조"],
-                                                    "source_url": "https://example.invalid/1",
-                                                    "effective_date": "2026-01-01"}}]), encoding="utf-8")
-        cases = (({"answer": "답", "citation": ["제1조"]}, None),
-                 ({"answer": "다른 답", "citation": ["제1조"]}, "S1(job_record_mismatch)"),
-                 ({"answer": "답", "citation": ["제2조"]}, "S1(job_record_mismatch)"),
-                 ({"answer": "답"}, "S1(job_record_mismatch)"))
-        for index, (response, expected) in enumerate(cases):
-            jobs = folder / ("match%d" % index)
-            self._job(jobs, "질문", response=response)
-            with self.subTest(response=response), patch.object(sac.subprocess, "run", return_value=result):
-                code, out = sac.run_kit_check(sys.executable, kit, "http://127.0.0.1:8010/ask", jobs_folder=jobs)
-                if expected is None:
-                    self.assertEqual(code, 0, out)
-                else:
-                    self.assertEqual(code, 1, out)
-                    self.assertIn(expected, out)
+    def test_unknown_requires_completed_http_delivery(self):
+        unknown = {**self.row, "response": {"answer": "확인 불가", "citation": [], "source_url": "", "effective_date": ""}}
+        self.assertEqual(self.check([unknown], lambda: self.record(unknown))[0], 0)
+        for fields in ({"rag_status": "processing_error"}, {"rag_status": "deadline_exceeded"},
+                       {"http_status": 500}, {"write_outcome": "disconnected"}):
+            with self.subTest(fields=fields):
+                code, _ = self.check([unknown], lambda: self.record(unknown, **fields))
+                self.assertEqual(code, 1)
 
-    def test_latest_job_record_wins_for_the_same_question(self):
-        jobs = Path(self.tmp.name) / "service_jobs"
-        old = self._job(jobs, "질문", "failed", {"status": "processing_error"}, name="a")
-        new = self._job(jobs, " 질문", "completed", None, name="b")
-        os.utime(old, (1_000_000, 1_000_000))
-        os.utime(new, (2_000_000, 2_000_000))
-        (jobs / "not-a-job.json").write_text('{"question": "질문", "status": "failed"}', encoding="utf-8")
-        (jobs / ("c" * 64 + ".json")).write_text("{broken", encoding="utf-8")
-        records = sac.latest_job_records(jobs)
-        self.assertEqual(records["질문"]["status"], "completed")
-        os.utime(old, (3_000_000, 3_000_000))
-        self.assertEqual(sac.latest_job_records(jobs)["질문"]["status"], "failed")
-        self.assertEqual(sac.latest_job_records(Path(self.tmp.name) / "missing"), {})
+    def test_kit_report_format_time_and_case_identity_are_checked(self):
+        samples = [{"id": "S1", "question": "질문"}]
+        for fields in ({"response": {}}, {"error": "timeout"}, {"format_ok": False}, {"sec": 91},
+                       {"id": "S2"}, {"question": "다른 질문"}, {"response": {**self.response, "extra": 1}}):
+            with self.subTest(fields=fields):
+                code, _ = self.check([{**self.row, **fields}], lambda: self.record(self.row), samples)
+                self.assertEqual(code, 1)
+
+    def test_all_four_fields_match_the_wire_response(self):
+        for key, changed in (("answer", "다른 답"), ("citation", ["제2조"]),
+                             ("source_url", "https://other.invalid"), ("effective_date", "2025-01-01")):
+            row = {**self.row, "response": {**self.response, key: changed}}
+            with self.subTest(key=key):
+                code, output = self.check([row], lambda: self.record(self.row))
+                self.assertEqual(code, 1)
+                self.assertIn("http_response_mismatch", output)
+
+    def test_waits_for_pending_http_log_to_finish(self):
+        seq = []
+        def during_run():
+            seq.append(self.record(self.row, write_outcome="pending"))
+        def finish_request(_seconds):
+            self.audit.update(seq[0], write_outcome="written")
+        with patch.object(sac.time, "sleep", side_effect=finish_request):
+            self.assertEqual(self.check([self.row], during_run)[0], 0)
 
 
 if __name__ == "__main__":
