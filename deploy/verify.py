@@ -93,7 +93,8 @@ def backup(snapshot_id):
     target, manifest = snapshot_paths(snapshot_id)
     require(DB.is_file() and not DB.is_symlink(), "Existing audit database is missing")
     BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
-    require(not target.exists() and not manifest.exists(), "Snapshot already exists")
+    require(not target.exists() and not target.is_symlink() and not manifest.exists() and not manifest.is_symlink(),
+            "Snapshot already exists")
     deadline = time.monotonic() + 30
 
     def progress(*_):
@@ -151,6 +152,13 @@ def live(snapshot_id):
     page = endpoints(8000, os.environ.get("REQUEST_LOG_PASSWORD"))
     current = rows(DB)
     preserved(baseline["rows"], current)
+    require(page["total"] >= len(baseline["rows"]), "Admin viewer is missing historical records")
+    require(len(page["items"]) == min(page["total"], 50), "Admin viewer returned an incomplete page")
+    visible = {str(item["seq"]): item["request_id"] for item in page["items"]}
+    require(len(visible) == len(page["items"]), "Admin viewer returned duplicate records")
+    for seq, request_id in visible.items():
+        require(seq in current and current[seq]["request_id"] == request_id,
+                "Admin viewer does not match the preserved audit database")
     baseline["verified"] = True
     temporary = manifest.with_suffix(".json.tmp")
     require(not temporary.exists() and not temporary.is_symlink(), "Unexpected temporary backup manifest")
