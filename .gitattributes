@@ -8,3 +8,7 @@
 *.sqlite3 binary
 /data/** -text
 .env.example text eol=lf
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+Dockerfile text eol=lf
