@@ -841,7 +841,7 @@ class Handler(BaseHTTPRequestHandler):
         if lang != "ko":
             # 검색은 한국어 질문으로 하고, 화면에는 고른 언어로 보여 줍니다.
             # 사진 속 글(개인정보 가린 것)도 번역해 "표지판에 뭐라고 쓰여 있는지"를 먼저 보여 줍니다.
-            result["question_display"] = i18n_answer.translate_text(result["question"], lang, self.server.translate_chat, "question")
+            result["question_display"] = i18n_answer.translate_question(result["question"], lang, self.server.translate_chat)
             result["text_translation"] = i18n_answer.translate_text(result["text"], lang, self.server.translate_chat, "sign")
         self._send(200, {"status": "ok", **result})
 

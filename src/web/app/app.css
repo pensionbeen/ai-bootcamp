@@ -359,3 +359,8 @@ body { background:#fff; }
 .photo-sign-text { margin:0; white-space:pre-wrap; font-size:15px; line-height:1.65; color:#0b1d38; }
 .photo-sign-text mark, .article-translation mark { background:#ffe36e; color:#142238; padding:0 2px; border-radius:3px; font-weight:700; }
 .photo-sign-note { margin:6px 0 0; font-size:12.5px; color:var(--muted); }
+
+/* 외국어 화면: 번역 위, 한국어 원문 아래 */
+.article-translation { margin:0 0 10px; padding:0 0 10px; border-top:0; border-bottom:1px dashed var(--line-strong); }
+.article-original-label { margin:0 0 4px; font-size:12.5px; font-weight:700; color:var(--muted); }
+.article-text h4.article-original-title { font-size:14px; color:#3b4a5e; margin:0 0 4px; }

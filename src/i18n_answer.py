@@ -78,6 +78,20 @@ def _json_reply(chat: Chat, system: str, user: str, field: str) -> str:
     return value.strip()
 
 
+def still_korean(text: str) -> bool:
+    """번역 결과가 사실상 한국어 그대로인지(모델이 원문을 되돌려 준 경우).
+
+    "KRW 100,000 (10만원)"처럼 괄호 속 한국어는 괜찮으므로 글자 비율로 봅니다.
+    """
+    hangul = len(re.findall(r"[가-힣]", text))
+    other = len(re.findall(r"[A-Za-z぀-ヿ一-鿿]", text))
+    return hangul > 0 and hangul >= (hangul + other) * 0.35
+
+
+def _source_block(text: str, lang: str) -> str:
+    return f"Translate the Korean text between <<< and >>> into {LANGS[lang]}. Write the result in {LANGS[lang]} only.\n<<<\n{text}\n>>>"
+
+
 def question_to_korean(question: str, lang: str, chat: Chat) -> str:
     """외국어 질문을 검색에 쓸 한국어 질문 하나로 바꿉니다."""
     system = (
@@ -113,9 +127,19 @@ def _values(text: str) -> set[float]:
     return found
 
 
+_HISTORY = re.compile(r"[<〈]\s*(?:개정|신설|본조신설|전문개정|삭제|타법개정)[^>〉]*[>〉]")
+_DATE = re.compile(r"\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.?")
+
+
+def strip_history(text: str) -> str:
+    """조문 끝의 개정 이력(<개정 2011.9.29, 2015.10.8>)을 뺍니다. 번역·숫자 대조 모두 본문만 봅니다."""
+    return re.sub(r"[ \t]+\n", "\n", _HISTORY.sub("", text)).strip()
+
+
 def answer_numbers(answer: str) -> set[float]:
-    """원문 답에서 지켜야 할 숫자 값. 조문 번호(제5조)는 빼고, 단위가 있거나 세 자리 이상인 숫자만."""
+    """원문 답에서 지켜야 할 숫자 값. 조문 번호(제5조)·개정 이력·날짜는 빼고, 단위가 있거나 세 자리 이상인 숫자만."""
     values = set()
+    answer = _DATE.sub(" ", strip_history(answer))
     for match in _KO_NUMBER.finditer(answer):
         start = match.start()
         if start > 0 and answer[start - 1] in "제":
@@ -145,9 +169,20 @@ def translate_answer(answer: str, lang: str, chat: Chat) -> dict[str, Any]:
         "parentheses, e.g. \"KRW 100,000 (10만원)\". Keep ordinance and article names in Korean inside quotes. "
         "Do not add advice or facts that are not in the original. Return JSON {\"answer\": \"...\"}."
     )
-    try:
-        translated = _json_reply(chat, system, answer[:TEXT_MAX], "answer")
-    except Exception:
+    translated = None
+    for _ in range(2):
+        try:
+            candidate = _json_reply(chat, system, _source_block(answer[:TEXT_MAX], lang), "answer")
+        except TranslateError:
+            system += "\nReturn valid JSON containing a nonempty translation."
+            continue
+        except Exception:
+            continue
+        if not still_korean(candidate):
+            translated = candidate
+            break
+        system += f"\nThe previous reply repeated the Korean source. Translate it into {LANGS[lang]}."
+    if translated is None:
         return {"text": answer, "verified": False, "reason": "translation_failed"}
     if not numbers_kept(answer, translated):
         return {"text": answer, "verified": False, "reason": "numbers_changed"}
@@ -164,16 +199,37 @@ TEXT_KINDS = {
 
 def translate_text(text: str, lang: str, chat: Chat, kind: str = "ordinance") -> str | None:
     """참고용 번역(조례 원문·표지판 글·질문). 숫자가 바뀌거나 실패하면 None."""
+    if kind == "ordinance":
+        text = strip_history(text)
     system = (
-        f"Translate {TEXT_KINDS[kind]} into {LANGS[lang]} as a faithful reference translation. "
+        f"You are a translator. Translate {TEXT_KINDS[kind]} into {LANGS[lang]} as a faithful reference translation. "
+        f"The output must be written in {LANGS[lang]}, never left in Korean. "
         "Keep numbers, article numbers (제N조 → Article N) and list markers. Do not summarize or add anything. "
         "Return JSON {\"text\": \"...\"}."
     )
-    try:
-        translated = _json_reply(chat, system, text[:TEXT_MAX], "text")
-    except Exception:
-        return None
-    return translated if numbers_kept(text, translated) else None
+    # 모델이 한국어를 그대로 돌려주는 일이 있어, 그 언어로 안 나왔으면 한 번 더 시도합니다.
+    for _ in range(2):
+        try:
+            translated = _json_reply(chat, system, _source_block(text[:TEXT_MAX], lang), "text")
+        except TranslateError:
+            system += "\nReturn valid JSON containing a nonempty translation."
+            continue
+        except Exception:
+            continue
+        if still_korean(translated) or not numbers_kept(text, translated):
+            system += f"\nTranslate the source again into {LANGS[lang]}, preserving all original values."
+            continue
+        return translated
+    return None
+
+
+def translate_question(question: str, lang: str, chat: Chat) -> str | None:
+    """사진에서 만든 한국어 질문을 사용자 언어로 보여 주기 위한 번역.
+
+    검색은 원래 한국어 질문으로 하므로(손대지 않았을 때) 보여 주기용입니다.
+    숫자 대조에서 떨어지거나 응답이 비면 한 번 더 시도합니다.
+    """
+    return translate_text(question, lang, chat, "question")
 
 
 def upstage_chat(project) -> Chat:
