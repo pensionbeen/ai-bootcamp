@@ -7,7 +7,7 @@
 - 서버 하나가 **화면 파일**(HTML·CSS·JS·이미지)과 **API**를 같은 주소에서 함께 내보냅니다.
 - 화면 파일은 `src/web/` 폴더에 둡니다. `http://127.0.0.1:8000/`을 열면 `src/web/index.html`이 나오고, `src/web/css/site.css`는 `http://127.0.0.1:8000/css/site.css`로 열립니다.
 - 파일을 고친 뒤에는 브라우저를 새로 고치기만 하면 됩니다. 서버를 다시 켤 필요가 없습니다(서버가 파일을 매번 새로 읽고, 브라우저에 저장하지 말라는 헤더 `Cache-Control: no-store`를 붙입니다).
-- 지금 들어 있는 `src/web/index.html`이 동작하는 기본 화면입니다. 이 파일을 고쳐도 되고, 새로 만들어 바꿔도 됩니다.
+- 지금 들어 있는 `src/web/index.html`이 시민용 Lawddy 화면이고, 동작·스타일·이미지는 `src/web/app/`(`app.mjs` 화면, `api.mjs` 서버 응답 처리, `examples.mjs` 예시 질문, `app.css`)에 있습니다. 이전 기본 화면은 `src/web/legacy.html`(`/legacy.html`)로 남겨 두었습니다. `api.mjs`의 시험은 `tests/test_web_app_api.mjs`입니다.
 - 화면은 `POST /ui/ask`, `GET /jobs/<job_id>`, `GET /health` 세 가지만 씁니다.
 - `POST /ask`는 **채점용**입니다. 화면에서 부르지 말고, 서버 쪽 동작도 바꾸지 마세요.
 
@@ -107,7 +107,7 @@ Content-Type: application/json
 }
 ```
 
-시민 화면에서 **국민신문고에 문의하기** 링크를 연결할 때는 `result.inquiry_url` 값을 `href`로 사용하세요. 현재 기본 화면은 확인 불가 사유까지만 표시합니다. 서버는 근거 부족(`insufficient_evidence`)이나 범위 밖(`out_of_scope`)으로 판정해 `확인 불가`와 빈 인용을 반환할 때만 문의 주소를 보냅니다. 필드가 없으면 링크를 숨기세요. 답변이 다른 조례나 시행규칙을 가리키면서 조항을 인용했다면 해당 답과 근거 링크를 그대로 표시합니다.
+시민 화면에서 **국민신문고에 문의하기** 링크를 연결할 때는 `result.inquiry_url` 값을 `href`로 사용하세요. 지금 화면(`src/web/app/app.mjs`)은 이 값이 있을 때 문의 버튼을 보여 줍니다. 서버는 근거 부족(`insufficient_evidence`)이나 범위 밖(`out_of_scope`)으로 판정해 `확인 불가`와 빈 인용을 반환할 때만 문의 주소를 보냅니다. 필드가 없으면 링크를 숨기세요. 답변이 다른 조례나 시행규칙을 가리키면서 조항을 인용했다면 해당 답과 근거 링크를 그대로 표시합니다.
 
 #### (다) 확인 불가 — 답을 확정하지 못함
 
@@ -218,7 +218,7 @@ Content-Type: application/json
 | 409 | `interrupted` | 이전 처리가 중단됨(`message` 있음) | 같은 질문을 다시 보내라고 안내 |
 | 404 | `job_not_found` | 없는 번호 | 질문을 다시 보내라고 안내 |
 
-`result.response` 안의 `source_url`·`effective_date`는 조항이 하나면 문자열, 여러 개면 목록입니다. 조항별 값은 `result.sources[]`에서 읽는 것이 가장 쉽습니다. 지금 `src/web/index.html`의 `jobToView` 함수가 이 응답을 `/ui/ask` 모양으로 바꾸는 예시입니다. 조회를 무한히 반복하지 말고 상한(지금 화면은 10분)을 두세요.
+`result.response` 안의 `source_url`·`effective_date`는 조항이 하나면 문자열, 여러 개면 목록입니다. 조항별 값은 `result.sources[]`에서 읽는 것이 가장 쉽습니다. 지금 `src/web/app/api.mjs`의 `jobToView` 함수가 이 응답을 `/ui/ask` 모양으로 바꾸는 예시입니다. 조회를 무한히 반복하지 말고 상한(지금 화면은 10분)을 두세요.
 
 ### 3-3. `GET /health` — 서버 상태
 
