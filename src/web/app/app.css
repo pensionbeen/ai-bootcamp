@@ -369,11 +369,11 @@ body { background:#fff; }
    .hero는 grid라서 사파리가 칸 너비를 내용 최대 너비로 잡으면 화면보다 넓어지고, 페이지 전체가 축소돼 보였습니다.
    칸을 화면 너비로 고정하고, 혹시 남는 넘침은 잘라 냅니다(clip은 sticky 머리를 깨뜨리지 않음). */
 .hero { grid-template-columns: minmax(0, 1fr); }
-.hero .wrap, .hero .search, .hero-lead, .hero-note { min-width: 0; max-width: 100%; }
 html, body { overflow-x: clip; }
 /* 제목이 바뀔 때 완전히 사라지지 않게(캡처·스크린샷에서 빈칸으로 보이지 않도록) */
 .hero-title.is-switching { opacity: .25; }
 @media (max-width: 720px) {
+   .hero .wrap, .hero .search, .hero-lead, .hero-note { min-width: 0; max-width: 100%; }
   .hero .wrap { padding-left: 18px; padding-right: 18px; box-sizing: border-box; }
   .hero h1 { font-size: 30px; line-height: 1.25; }
   .hero-title { min-height: 2.5em; }
