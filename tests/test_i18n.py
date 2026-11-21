@@ -70,6 +70,27 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(bad["verified"])
         self.assertEqual(bad["text"], KO_ANSWER)
 
+    def test_amendment_history_and_dates_do_not_block_article_translation(self):
+        source = "① 시장은 금연구역 안내표지판을 설치하여야 한다.<개정 2011.9.29, 2015.10.8>"
+        self.assertEqual(i18n.answer_numbers(source), set())
+        self.assertNotIn("개정", i18n.strip_history(source))
+        chat = fake_chat(text="(1) The Mayor shall install no-smoking signs.")
+        self.assertEqual(i18n.translate_text(source, "en", chat), "(1) The Mayor shall install no-smoking signs.")
+        self.assertNotIn("2011", chat.calls[0]["messages"][-1]["content"])
+        self.assertIn(100000.0, i18n.answer_numbers("과태료 10만원 부과 <개정 2015.10.8>"))
+
+    def test_korean_echo_is_not_accepted_as_translation(self):
+        # 모델이 한국어를 그대로 돌려주면 번역으로 쓰지 않고 다시 시도합니다.
+        source = "금연구역 흡연 시 500만원 이하의 과태료 부과"
+        echo = fake_chat(text=source, answer=KO_ANSWER)
+        self.assertIsNone(i18n.translate_text(source, "en", echo, "sign"))
+        self.assertEqual(len(echo.calls), 2)
+        self.assertFalse(i18n.translate_answer(KO_ANSWER, "en", echo)["verified"])
+        replies = iter([source, "Fine of up to KRW 5,000,000 (500만원)."])
+        def flaky(payload, timeout):
+            return reply(text=next(replies))
+        self.assertIn("5,000,000", i18n.translate_text(source, "en", flaky, "sign"))
+
     def test_translate_text_returns_none_on_number_mismatch(self):
         source = "① 금연구역에서 흡연을 한 사람은 10만원의 과태료를 부과한다."
         self.assertIn("100,000", i18n.translate_text(source, "en", fake_chat()))

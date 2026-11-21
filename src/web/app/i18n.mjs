@@ -184,6 +184,8 @@ const ROWS = [
   ["검색 DB에 저장된 조례 원문입니다. 답에 나온 숫자·금액을 형광펜으로 표시했어요.", "This is the Korean ordinance text. Numbers and amounts from the answer are highlighted.", "这是韩文条例原文，回答中的数字和金额已用荧光笔标出。", "這是韓文條例原文，回答中的數字和金額已用螢光筆標出。", "韓国語の条例原文です。回答に出た数字・金額をマーカーで示しています。"],
   ["검색 DB에 저장된 조례 원문입니다.", "This is the Korean ordinance text.", "这是韩文条例原文。", "這是韓文條例原文。", "韓国語の条例原文です。"],
   ["이 조항의 원문은 '원문 보기'로 법제처에서 확인해 주세요.", "Open 'Official text' to read this article on law.go.kr.", "请点击“查看原文”在法制处网站阅读此条。", "請點擊「查看原文」在法制處網站閱讀此條。", "「原文を見る」から法制処サイトでご確認ください。"],
+  ["번역을 먼저 보여 드리고, 공식인 한국어 원문은 아래에 있어요. 답에 나온 숫자·금액은 형광펜으로 표시했어요.", "Translation first; the official Korean text is below. Numbers and amounts from the answer are highlighted.", "先显示译文，正式的韩文原文在下方。回答中的数字和金额已用荧光笔标出。", "先顯示譯文，正式的韓文原文在下方。回答中的數字和金額已用螢光筆標出。", "翻訳を先に表示し、正式な韓国語原文は下にあります。回答の数字・金額はマーカーで示しています。"],
+  ["한국어 원문 (공식)", "Korean original (official)", "韩文原文（正式）", "韓文原文（正式）", "韓国語原文（正式）"],
   ["번역 (참고용)", "Translation (for reference)", "译文（仅供参考）", "譯文（僅供參考）", "翻訳（参考）"],
   ["번역하지 못했어요. 숫자가 달라질 수 있어 원문만 보여 드려요.", "Not translated: we show only the original so no number is changed.", "未翻译：为避免数字出错，只显示原文。", "未翻譯：為避免數字出錯，只顯示原文。", "数字の誤りを避けるため、原文のみ表示しています。"],
   // 사진
