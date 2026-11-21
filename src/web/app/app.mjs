@@ -354,16 +354,20 @@ function wireSourceTexts(card, view, items) {
     const tokens = numberTokens(typeof view.answer === "string" ? view.answer : "");
     const legend = document.createElement("p");
     legend.className = "source-text-note";
-    legend.textContent = tokens.length
-      ? t("검색 DB에 저장된 조례 원문입니다. 답에 나온 숫자·금액을 형광펜으로 표시했어요.")
-      : t("검색 DB에 저장된 조례 원문입니다.");
+    legend.textContent = isForeign()
+      ? t("번역을 먼저 보여 드리고, 공식인 한국어 원문은 아래에 있어요. 답에 나온 숫자·금액은 형광펜으로 표시했어요.")
+      : tokens.length
+        ? t("검색 DB에 저장된 조례 원문입니다. 답에 나온 숫자·금액을 형광펜으로 표시했어요.")
+        : t("검색 DB에 저장된 조례 원문입니다.");
     box.appendChild(legend);
     outcome.sources.forEach((source) => {
       const block = document.createElement("section");
       block.className = "article-text";
+      // 외국어 화면은 내 언어(번역)가 맨 위에 오도록 한국어 조항 제목을 원문 쪽으로 내립니다.
       const title = document.createElement("h4");
       title.textContent = source.citation;
-      block.appendChild(title);
+      title.lang = "ko";
+      if (!isForeign() || !source.found) block.appendChild(title);
       const pre = document.createElement("p");
       pre.className = "article-body";
       pre.lang = "ko";
@@ -380,8 +384,7 @@ function wireSourceTexts(card, view, items) {
       } else {
         pre.textContent = t("이 조항의 원문은 '원문 보기'로 법제처에서 확인해 주세요.");
       }
-      block.appendChild(pre);
-      // 외국어 화면: 원문 아래에 번역을 붙입니다. 서버가 숫자를 대조해 다르면 번역을 주지 않습니다.
+      // 외국어 화면: 번역을 위에, 한국어 원문을 아래에 둡니다. 서버가 숫자를 대조해 다르면 번역을 주지 않습니다.
       if (isForeign() && source.found) {
         const translation = document.createElement("div");
         translation.className = "article-translation";
@@ -397,7 +400,17 @@ function wireSourceTexts(card, view, items) {
         }
         translation.append(label, body);
         block.appendChild(translation);
+        const originalLabel = document.createElement("p");
+        originalLabel.className = "article-original-label";
+        originalLabel.textContent = t("한국어 원문 (공식)");
+        block.appendChild(originalLabel);
+        // 원문 첫 줄에 조항 제목이 이미 들어 있으면 제목을 또 붙이지 않습니다.
+        if (!String(source.text || "").startsWith(source.citation)) {
+          title.classList.add("article-original-title");
+          block.appendChild(title);
+        }
       }
+      block.appendChild(pre);
       box.appendChild(block);
     });
     box.hidden = false;
