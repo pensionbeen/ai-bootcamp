@@ -364,3 +364,26 @@ body { background:#fff; }
 .article-translation { margin:0 0 10px; padding:0 0 10px; border-top:0; border-bottom:1px dashed var(--line-strong); }
 .article-original-label { margin:0 0 4px; font-size:12.5px; font-weight:700; color:var(--muted); }
 .article-text h4.article-original-title { font-size:14px; color:#3b4a5e; margin:0 0 4px; }
+
+/* ---- 모바일(아이폰 사파리) 가로 넘침 수정 ----
+   .hero는 grid라서 사파리가 칸 너비를 내용 최대 너비로 잡으면 화면보다 넓어지고, 페이지 전체가 축소돼 보였습니다.
+   칸을 화면 너비로 고정하고, 혹시 남는 넘침은 잘라 냅니다(clip은 sticky 머리를 깨뜨리지 않음). */
+.hero { grid-template-columns: minmax(0, 1fr); }
+.hero .wrap, .hero .search, .hero-lead, .hero-note { min-width: 0; max-width: 100%; }
+html, body { overflow-x: clip; }
+/* 제목이 바뀔 때 완전히 사라지지 않게(캡처·스크린샷에서 빈칸으로 보이지 않도록) */
+.hero-title.is-switching { opacity: .25; }
+@media (max-width: 720px) {
+  .hero .wrap { padding-left: 18px; padding-right: 18px; box-sizing: border-box; }
+  .hero h1 { font-size: 30px; line-height: 1.25; }
+  .hero-title { min-height: 2.5em; }
+  .hero-lead { font-size: 14.5px; line-height: 1.7; }
+  .hero-note { font-size: 12px; line-height: 1.6; }
+  .search-btn { white-space: nowrap; }
+}
+@media (max-width: 720px) {
+  /* 제목이 언어마다 2~3줄이라 높이를 3줄로 고정하고 가운데 맞춤: 돌아갈 때 아래 내용이 들썩이지 않게 */
+  .hero h1 { font-size: 28px; }
+  .hero-title { min-height: 3.75em; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+  .hero-title br { display: none; }
+}
