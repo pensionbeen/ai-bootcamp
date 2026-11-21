@@ -173,11 +173,15 @@ def translate_answer(answer: str, lang: str, chat: Chat) -> dict[str, Any]:
     for _ in range(2):
         try:
             candidate = _json_reply(chat, system, _source_block(answer[:TEXT_MAX], lang), "answer")
+        except TranslateError:
+            system += "\nReturn valid JSON containing a nonempty translation."
+            continue
         except Exception:
             continue
         if not still_korean(candidate):
             translated = candidate
             break
+        system += f"\nThe previous reply repeated the Korean source. Translate it into {LANGS[lang]}."
     if translated is None:
         return {"text": answer, "verified": False, "reason": "translation_failed"}
     if not numbers_kept(answer, translated):
@@ -207,9 +211,13 @@ def translate_text(text: str, lang: str, chat: Chat, kind: str = "ordinance") ->
     for _ in range(2):
         try:
             translated = _json_reply(chat, system, _source_block(text[:TEXT_MAX], lang), "text")
+        except TranslateError:
+            system += "\nReturn valid JSON containing a nonempty translation."
+            continue
         except Exception:
             continue
         if still_korean(translated) or not numbers_kept(text, translated):
+            system += f"\nTranslate the source again into {LANGS[lang]}, preserving all original values."
             continue
         return translated
     return None
