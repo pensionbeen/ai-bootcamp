@@ -1,0 +1,14 @@
+{
+  "apiVersion": "traefik.io/v1alpha1",
+  "kind": "IngressRoute",
+  "metadata": {"name": "upstage-visits-https", "namespace": "default"},
+  "spec": {
+    "entryPoints": ["websecure"],
+    "routes": [{
+      "kind": "Rule", "priority": 2000,
+      "match": "Host(`upstage.makertion.com`) && Method(`GET`) && (Path(`/`) || Path(`/index.html`) || Path(`/legacy.html`) || Path(`/test`) || Path(`/test/`) || Path(`/test.html`) || Path(`/admin/visits`) || Path(`/admin/visits/`) || Path(`/admin/visits/data`) || Path(`/visit-log.mjs`))",
+      "services": [{"name": "upstage-visits", "port": 80}]
+    }],
+    "tls": {"secretName": "makertion-tls"}
+  }
+}

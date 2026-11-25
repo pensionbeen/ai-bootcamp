@@ -2,6 +2,10 @@
 
 `main`의 변경을 서버가 약 1분마다 확인합니다. 새 커밋을 빌드하고 격리된 컨테이너에서 `/ask` 계약, `/test`, 관리자 인증과 로그 테스트를 통과한 경우에만 `default/upstage-bootcamp`의 `app` 이미지를 교체합니다. 빌드 시간과 점검 시간만큼 반영이 늦어질 수 있습니다.
 
+`visit_service/`의 독립 방문 기록 서비스와 `deploy/deploy.sh`, `deploy/test_deploy_runner.py`, `deploy/README.md`만 바뀐 커밋은 RAG 앱을 빌드하거나 재시작하지 않습니다. 마지막 실제 RAG 배포 커밋과 현재 `main`의 차이를 매번 비교하며, 이 네 범위 밖의 파일이 하나라도 바뀌면 기존 배포 검증을 진행합니다. 비교 실패나 마지막 배포 커밋을 포함하지 않는 이력은 중단합니다.
+
+건너뛴 경우 `deployed-state`는 실행 중인 RAG 이미지의 실제 SHA와 이미지명을 그대로 유지합니다. 따라서 방문 기록 서비스만 반영된 뒤 `main` SHA와 RAG 배포 SHA가 달라도 정상입니다. 방문 기록 서비스 배포는 별도 절차에서 관리하며, 이 실행 파일이 대신 배포하지 않습니다. `--check`는 이전과 같이 저장소 접근과 실제 RAG 이미지 일치 여부만 확인합니다.
+
 ## 보존되는 항목
 
 - `upstage-bootcamp-data` PVC와 `/app/data/processed/local_rag` 경로를 그대로 사용합니다. 요청 기록 SQLite와 기존 답변 데이터가 여기에 있습니다.
