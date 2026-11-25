@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>방문 기록 · 서울시 조례 Q&amp;A</title>
+  <style>
+    :root { color-scheme: light; --ink: #18283b; --muted: #536578; --line: #d6dfe7; --blue: #185aa8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f6f8fa; color: var(--ink); font: 1rem/1.6 system-ui, "Malgun Gothic", sans-serif; }
+    main { max-width: 1060px; margin: auto; padding: 28px 24px 64px; }
+    nav, .toolbar, .pagination, .record-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    nav { margin-bottom: 24px; }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    nav a { font-size: .9rem; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.4rem); line-height: 1.3; letter-spacing: -.04em; }
+    header p { color: var(--muted); margin-top: 8px; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, "Malgun Gothic", monospace; }
+    .totals { display: flex; gap: 16px 32px; flex-wrap: wrap; margin-top: 22px; }
+    .totals p { color: var(--muted); font-size: .9rem; }
+    .totals strong { display: block; color: var(--ink); font-size: 1.55rem; line-height: 1.4; }
+    .toolbar { margin: 22px 0 8px; }
+    button, select { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink); font: 600 .9rem/1.5 system-ui, "Malgun Gothic", sans-serif; }
+    button { cursor: pointer; }
+    button:hover:enabled { border-color: var(--blue); color: var(--blue); }
+    button:disabled { opacity: .45; cursor: default; }
+    #refresh { background: var(--blue); border-color: var(--blue); color: white; }
+    label { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; }
+    :focus-visible { outline: 3px solid #438ce1; outline-offset: 3px; }
+    #summary, #updated, #refresh-note, .help, .record-meta { color: var(--muted); font-size: .85rem; }
+    #updated { margin-left: auto; }
+    #message { margin-top: 10px; }
+    #message:empty { display: none; }
+    #message.error { padding: 10px 14px; border-radius: 6px; background: #feeeee; color: #942a29; }
+    #message.success { color: #205b41; }
+    .count-row { margin: 17px 0 10px; }
+    #records { display: grid; gap: 10px; }
+    .record { background: white; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+    .record.is-new { border-left: 4px solid var(--blue); }
+    .record > summary { cursor: pointer; padding: 14px 17px; list-style: none; }
+    .record > summary::-webkit-details-marker { display: none; }
+    .record-meta { margin-bottom: 7px; }
+    .record-meta::before { content: "›"; font-size: 1.1rem; font-weight: 700; line-height: 1; }
+    .record[open] .record-meta::before { transform: rotate(90deg); }
+    .record-meta .status { margin-left: auto; }
+    .kind, .bot { font-size: .75rem; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; }
+    .bot { color: #77530b; background: #fff5d9; border-color: #efd99b; }
+    .status { font-size: .8rem; font-weight: 650; padding: 2px 7px; border-radius: 4px; }
+    .status.ok { color: #205b41; background: #e6f4eb; }
+    .status.bad { color: #942a29; background: #feeeee; }
+    .status.neutral { color: var(--muted); background: #eef2f6; }
+    .visit-line { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; padding-left: 22px; }
+    .path { font-weight: 650; overflow-wrap: anywhere; }
+    .ip { font-size: .85rem; color: var(--muted); overflow-wrap: anywhere; }
+    .details { padding: 0 17px 12px; border-top: 1px solid var(--line); }
+    dl { display: grid; grid-template-columns: 145px minmax(0, 1fr); gap: 5px 14px; margin: 14px 0; font-size: .85rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .help { margin-top: 14px; }
+    #empty { padding: 36px 18px; text-align: center; background: white; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); }
+    .pagination { margin-top: 18px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 640px) {
+      main { padding: 18px 14px 38px; }
+      .record-meta { gap: 6px; }
+      .record-meta .status { margin-left: 0; }
+      #updated { margin-left: 0; width: 100%; }
+      dl { grid-template-columns: 1fr; gap: 0; }
+      dd { margin-bottom: 8px; }
+    }
+  </style>
+  <script type="module" src="/visit-log.mjs"></script>
+</head>
+<body>
+  <main>
+    <nav><a href="/">← 서울시 조례 묻고 답하기</a><a href="/admin/requests">질문 API 요청 기록</a></nav>
+    <header>
+      <h1>방문 기록</h1>
+      <p>웹페이지를 열어본 요청을 확인합니다. 시각과 날짜 기준은 한국 시간입니다.</p>
+    </header>
+    <div class="totals" aria-label="페이지 조회 집계">
+      <p>오늘<strong id="today-count">—</strong></p>
+      <p>최근 7일<strong id="week-count">—</strong></p>
+    </div>
+    <div class="toolbar">
+      <label for="period">조회 기간
+        <select id="period"><option value="all">전체 보관 기록</option><option value="today">오늘</option><option value="7d">최근 7일</option></select>
+      </label>
+      <button id="refresh" type="button">새로고침</button>
+      <label><input id="auto-refresh" type="checkbox" checked>10초마다 새로고침</label>
+      <span id="updated"></span>
+    </div>
+    <p id="refresh-note"></p>
+    <p id="message" role="status" aria-live="polite"></p>
+    <div class="count-row"><p id="summary">기록을 불러오는 중입니다.</p></div>
+    <section id="records" aria-label="방문 목록" aria-busy="true"></section>
+    <p id="empty" hidden>선택한 기간에 기록된 방문이 없습니다.</p>
+    <div class="pagination" aria-label="기록 페이지">
+      <button id="latest" type="button" disabled>최신 기록</button>
+      <button id="newer" type="button" disabled>이전 페이지</button>
+      <span id="page-number">1페이지</span>
+      <button id="older" type="button" disabled>다음 페이지</button>
+    </div>
+    <p id="retention" class="help"></p>
+    <p id="capturing-since" class="help"></p>
+    <p class="help">기록 대상은 첫 화면, 이전 화면, 테스트 화면의 페이지 열람 요청입니다. 이미지·스크립트·상태 점검·질문 API 요청은 포함하지 않습니다. 주소의 검색 조건과 쿠키는 수집하지 않습니다.</p>
+    <p class="help">조회 수는 사람 수가 아닙니다. 새로고침과 자동 접속도 포함될 수 있습니다. IP와 사용자 에이전트는 참고 정보이며, ‘자동 접속 추정’은 사용자 에이전트를 기준으로 분류합니다.</p>
+    <noscript>방문 기록을 보려면 브라우저에서 자바스크립트를 켜 주세요.</noscript>
+    <template id="record-template">
+      <details class="record">
+        <summary>
+          <div class="record-meta"><time></time><span class="kind"></span><span class="bot" hidden>자동 접속 추정</span><span class="status"></span></div>
+          <div class="visit-line"><code class="path"></code><span class="ip"></span></div>
+        </summary>
+        <div class="details"><dl></dl></div>
+      </details>
+    </template>
+  </main>
+</body>
+</html>

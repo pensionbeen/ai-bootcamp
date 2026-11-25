@@ -16,7 +16,7 @@ OLD_IMAGE = "upstage-bootcamp:8208d87"
 NEW_IMAGE = "upstage-bootcamp:" + NEW_SHA
 
 MOCK = r'''
-import io, json, os, pathlib, shutil, sys, tarfile
+import io, json, os, pathlib, shutil, subprocess, sys, tarfile
 sys.stdout.reconfigure(newline="\n")
 
 def path(value):
@@ -44,6 +44,18 @@ if command == "git":
         print(sha)
     elif "merge-base" in args:
         sys.exit(1 if case == "rewritten-history" else 0)
+    elif "diff" in args:
+        if case == "diff-error":
+            sys.exit(128)
+        if os.environ.get("DEPLOY_TEST_DIFF_REPO"):
+            # Exercise the runner's actual Git pathspec against real commits.
+            diff_args = args[args.index("diff"):]
+            pathspec = diff_args[diff_args.index("--") + 1:]
+            result = subprocess.run([os.environ["DEPLOY_TEST_REAL_GIT"], "-C",
+                                     os.environ["DEPLOY_TEST_DIFF_REPO"], "diff", "--quiet",
+                                     "HEAD~1", "HEAD", "--", *pathspec])
+            sys.exit(result.returncode)
+        sys.exit(1)
     elif "archive" in args:
         with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
             names = ["deploy/Dockerfile", "src/request_audit.py", "src/web/request-log.html",
@@ -115,6 +127,9 @@ class DeploymentRunnerTests(unittest.TestCase):
                 cls.bash = str(candidate)
         if not cls.bash:
             raise unittest.SkipTest("bash is required for deployment runner tests")
+        cls.git = shutil.which("git")
+        if not cls.git:
+            raise unittest.SkipTest("git is required for deployment runner tests")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="upstage-deploy-test-")
@@ -168,6 +183,27 @@ class DeploymentRunnerTests(unittest.TestCase):
     def patches(self):
         return [call for call in self.commands if call[:5] == ["kubectl", "--namespace", "default", "set", "image"]]
 
+    def changed_files(self, names):
+        """Supply actual Git changes without allowing any production commands."""
+        repository = self.root / "diff-repository"
+        repository.mkdir()
+        def git(*args):
+            subprocess.run([self.git, "-C", str(repository), *args], check=True,
+                           capture_output=True, text=True, timeout=15)
+        git("init")
+        (repository / "baseline").write_text("unchanged\n")
+        git("add", ".")
+        git("-c", "user.name=Deployment Test", "-c", "user.email=deploy@example.invalid",
+            "commit", "--no-verify", "-m", "baseline")
+        for name in names:
+            target = repository / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("changed\n")
+        git("add", ".")
+        git("-c", "user.name=Deployment Test", "-c", "user.email=deploy@example.invalid",
+            "commit", "--no-verify", "-m", "change")
+        self.env.update(DEPLOY_TEST_REAL_GIT=self.git, DEPLOY_TEST_DIFF_REPO=str(repository))
+
     def assert_preserved(self):
         self.assertEqual((self.root / "persistent-log").read_bytes(), self.history)
         self.assertEqual((self.root / "live-image").read_text(), OLD_IMAGE)
@@ -215,6 +251,59 @@ class DeploymentRunnerTests(unittest.TestCase):
         self.assertFalse(any(call[:2] in (["docker", "run"], ["docker", "build"]) for call in self.commands))
         self.assertEqual(self.patches(), [])
 
+    def test_visit_only_change_does_not_relabel_or_restart_rag(self):
+        self.changed_files(["visit_service/server.py", "visit_service/web/admin.html"])
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("RAG application inputs unchanged", self.output)
+        self.assert_preserved()
+        self.assertEqual(self.patches(), [])
+        self.assertFalse((self.root / "snapshot-log").exists())
+        self.assertFalse((self.state / "failed-sha").exists())
+        self.assertFalse(any(call[:2] in (["docker", "run"], ["docker", "build"]) for call in self.commands))
+        diff = next(call for call in self.commands if call[0] == "git" and "diff" in call)
+        self.assertEqual(diff[diff.index("--quiet") + 1:diff.index("--")], [OLD_SHA, NEW_SHA])
+
+    def test_runner_only_change_does_not_restart_rag(self):
+        self.changed_files(["deploy/deploy.sh", "deploy/test_deploy_runner.py", "deploy/README.md"])
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("RAG application inputs unchanged", self.output)
+        self.assert_preserved()
+        self.assertEqual(self.patches(), [])
+        self.assertFalse(any(call[:2] == ["docker", "build"] for call in self.commands))
+
+    def test_mixed_visit_and_application_change_still_deploys(self):
+        self.changed_files(["visit_service/server.py", "src/local_rag_service.py"])
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertEqual([call[-1] for call in self.patches()], ["app=" + NEW_IMAGE])
+        self.assertEqual((self.state / "deployed-state").read_text(), NEW_SHA + " " + NEW_IMAGE + "\n")
+
+    def test_new_unknown_file_is_not_exempt_from_deployment(self):
+        self.changed_files(["visit_service_extra/config.json"])
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertEqual([call[-1] for call in self.patches()], ["app=" + NEW_IMAGE])
+
+    def test_visit_only_change_still_requires_running_revision_ancestor(self):
+        self.changed_files(["visit_service/server.py"])
+        result = self.run_deploy("rewritten-history")
+        self.assertNotEqual(result.returncode, 0, self.output)
+        self.assertIn("history rewrite", self.output)
+        self.assert_preserved()
+        self.assertEqual(self.patches(), [])
+        self.assertFalse(any(call[0] == "git" and "diff" in call for call in self.commands))
+
+    def test_diff_failure_is_not_treated_as_unchanged_or_deployed(self):
+        result = self.run_deploy("diff-error")
+        self.assertNotEqual(result.returncode, 0, self.output)
+        self.assertIn("git diff exit 128", self.output)
+        self.assert_preserved()
+        self.assertEqual(self.patches(), [])
+        self.assertFalse(any(call[:2] == ["docker", "build"] for call in self.commands))
+        self.assertEqual((self.state / "failed-sha").read_text().strip(), NEW_SHA)
+
     def test_check_mode_reads_access_without_deploying(self):
         result = self.run_deploy("success", "--check")
         self.assertEqual(result.returncode, 0, self.output)
@@ -223,6 +312,7 @@ class DeploymentRunnerTests(unittest.TestCase):
         self.assertFalse((self.root / "snapshot-log").exists())
         self.assertFalse((self.deploy / "repository.git").exists())
         self.assertFalse(any(call[:2] in (["docker", "run"], ["docker", "build"]) for call in self.commands))
+        self.assertFalse(any(call[0] == "git" and "diff" in call for call in self.commands))
 
     def test_unmanaged_live_image_is_never_replaced(self):
         changed = "upstage-bootcamp:ccccccc"

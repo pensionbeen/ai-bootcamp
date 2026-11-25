@@ -1,0 +1,56 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "upstage-visits-data", "namespace": "default"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
+        "resources": {"requests": {"storage": "1Gi"}}
+      }
+    },
+    {
+      "apiVersion": "v1", "kind": "Service",
+      "metadata": {"name": "upstage-visits", "namespace": "default"},
+      "spec": {
+        "selector": {"app": "upstage-visits"},
+        "ports": [{"port": 80, "targetPort": "http", "protocol": "TCP"}]
+      }
+    },
+    {
+      "apiVersion": "apps/v1", "kind": "Deployment",
+      "metadata": {"name": "upstage-visits", "namespace": "default"},
+      "spec": {
+        "replicas": 1, "revisionHistoryLimit": 3, "minReadySeconds": 5,
+        "progressDeadlineSeconds": 180,
+        "selector": {"matchLabels": {"app": "upstage-visits"}},
+        "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}},
+        "template": {
+          "metadata": {"labels": {"app": "upstage-visits"}},
+          "spec": {
+            "automountServiceAccountToken": false, "terminationGracePeriodSeconds": 30,
+            "securityContext": {"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001, "seccompProfile": {"type": "RuntimeDefault"}},
+            "containers": [{
+              "name": "app", "image": "upstage-visits:bootstrap", "imagePullPolicy": "Never",
+              "ports": [{"name": "http", "containerPort": 8080}],
+              "env": [
+                {"name": "PORT", "value": "8080"},
+                {"name": "UPSTREAM_URL", "value": "http://upstage-bootcamp.default.svc.cluster.local"},
+                {"name": "VISIT_DATA_DIR", "value": "/data"},
+                {"name": "REQUEST_LOG_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "upstage-request-log-admin", "key": "REQUEST_LOG_PASSWORD"}}}
+              ],
+              "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}, "periodSeconds": 3, "timeoutSeconds": 2, "failureThreshold": 3},
+              "livenessProbe": {"tcpSocket": {"port": "http"}, "periodSeconds": 30, "timeoutSeconds": 3},
+              "lifecycle": {"preStop": {"exec": {"command": ["python", "-c", "import time; time.sleep(5)"]}}},
+              "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}},
+              "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
+              "volumeMounts": [{"name": "visits", "mountPath": "/data"}, {"name": "tmp", "mountPath": "/tmp"}]
+            }],
+            "volumes": [{"name": "visits", "persistentVolumeClaim": {"claimName": "upstage-visits-data"}}, {"name": "tmp", "emptyDir": {"sizeLimit": "16Mi"}}]
+          }
+        }
+      }
+    }
+  ]
+}

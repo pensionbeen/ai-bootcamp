@@ -125,6 +125,20 @@ if [[ "$sha" == "$failed_sha" && "$RETRY" == 0 ]]; then
   exit 0
 fi
 git -C "$REPOSITORY" merge-base --is-ancestor "$previous_sha" "$sha" || die 'Refusing a history rewrite; main must include the last healthy release.'
+# The visit logger runs separately. These operator-installed runner files and
+# its own directory do not change the RAG image inputs. Compare from the actual
+# running revision each poll; never relabel that image as the fetched main SHA.
+if git -C "$REPOSITORY" diff --quiet "$previous_sha" "$sha" -- . \
+    ':(exclude)visit_service/**' \
+    ':(exclude)deploy/deploy.sh' \
+    ':(exclude)deploy/test_deploy_runner.py' \
+    ':(exclude)deploy/README.md'; then
+  log "RAG application inputs unchanged; retaining $previous_sha ($previous_image)."
+  exit 0
+else
+  diff_status=$?
+  [[ "$diff_status" == 1 ]] || die "Unable to compare RAG application inputs (git diff exit $diff_status)."
+fi
 release=$(mktemp -d "$RELEASES/${sha}.XXXXXX")
 git -C "$REPOSITORY" archive "$sha" | tar -x -C "$release"
 for required in deploy/Dockerfile src/request_audit.py src/web/request-log.html src/web/request-log.mjs src/web/test.html; do
